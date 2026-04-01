@@ -1,0 +1,4 @@
+interface:
+  display_name: "Telegram Handoff"
+  short_description: "Attach the current Codex thread to Telegram relay"
+  default_prompt: "Attach or detach the current Codex thread from the local Telegram bridge."

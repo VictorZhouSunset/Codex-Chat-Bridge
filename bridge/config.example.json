@@ -1,0 +1,13 @@
+{
+  "_notes": [
+    "The bridge auto-starts a temporary tray or menu-bar companion while a thread is attached.",
+    "If no release tray binary is built, the launcher falls back to cargo run, so Rust and Cargo must be available on PATH."
+  ],
+  "telegramBotToken": "PASTE_TELEGRAM_BOT_TOKEN_HERE",
+  "allowedChatIds": [
+    "PASTE_YOUR_TELEGRAM_CHAT_ID_HERE"
+  ],
+  "defaultChatId": "PASTE_YOUR_TELEGRAM_CHAT_ID_HERE",
+  "pollIntervalMs": 5000,
+  "controlPort": 47821
+}
