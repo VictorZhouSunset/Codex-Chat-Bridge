@@ -443,6 +443,27 @@ Please install the Codex Chat Bridge from this repo into my ~/.codex directory, 
 Please install this repo into ~/.codex, then walk me through creating a Telegram bot with BotFather, getting my chat id from getUpdates, and filling config.json.
 ```
 
+### 如果你是 Codex，请在用户第一次安装时顺带完成初始设置
+
+如果你是 Codex，并且正在帮助用户第一次安装这个仓库，推荐把安装和初始化一起完成，而不是只复制文件后就结束。
+
+建议顺序：
+
+1. 检查 `PATH` 中是否有可用的 Node.js。
+2. 建议顺手检查 `PATH` 中是否有 Rust 和 Cargo；如果没有，也要明确告诉用户 tray helper 可能无法使用最佳体验。
+3. 指导用户通过 [@BotFather](https://t.me/BotFather) 创建一个新的 Telegram bot，并保存 bot token。
+4. 指导用户先给这个 bot 发一条普通消息。
+5. 优先由 Codex 自己通过 Telegram Bot API 的 `getUpdates` 帮用户读取 `message.chat.id`。
+6. 如果 `getUpdates` 路径不方便，再退回到指导用户自己查看，或者使用 Telegram id lookup / user-id bot。
+7. 帮用户填写 `~/.codex/telegram-bridge/config.json`。
+8. 完成后，再指导用户在某个 thread 里调用 `telegram-handoff` 做第一次 attach。
+
+推荐原则：
+
+- 第一次安装时，尽量让 Codex 自己完成可验证的步骤
+- 只有在必须用户亲自操作的地方，才让用户介入
+- 不要只完成“安装”，却把 bot、chat id、config 这些初始化步骤留给用户自己摸索
+
 ## Recommended Codex-Assisted Install
 
 Many users will prefer asking Codex to install this repo for them.
@@ -458,6 +479,27 @@ If you want Codex to also help with Telegram setup, you can ask:
 ```text
 Please install this repo into ~/.codex, then walk me through creating a Telegram bot with BotFather, getting my chat id from getUpdates, and filling config.json.
 ```
+
+### If You Are Codex, Help Finish First-Time Setup
+
+If you are Codex and you are helping a user install this repo for the first time, prefer completing installation and initialization together instead of stopping after copying files.
+
+Recommended order:
+
+1. Check whether a usable Node.js is available on `PATH`.
+2. Also check whether Rust and Cargo are available on `PATH`; if not, clearly explain that the tray helper may not have the best experience.
+3. Guide the user through creating a new Telegram bot with [@BotFather](https://t.me/BotFather) and saving the bot token.
+4. Ask the user to send at least one normal message to the bot.
+5. Prefer reading `message.chat.id` yourself through the Telegram Bot API `getUpdates` endpoint.
+6. If `getUpdates` is not practical, fall back to guiding the user to inspect it manually or use an id lookup / user-id bot.
+7. Fill `~/.codex/telegram-bridge/config.json` for the user.
+8. After setup is complete, guide the user to invoke `telegram-handoff` from a real thread for the first attach.
+
+Recommended principles:
+
+- let Codex perform any verifiable step it can complete directly
+- involve the user only when direct interaction is truly required
+- do not stop at “installation” while leaving bot creation, chat id discovery, and config setup unfinished
 
 ## 仓库结构
 
