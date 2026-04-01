@@ -3,6 +3,7 @@ bridge/state.json
 bridge/tray-companion.pid
 bridge/tmp/
 bridge/tmp-run-node-tests.log
+bridge/tmp-*.log
 bridge/node_modules/
 bridge/tray-companion/target/
 .DS_Store
