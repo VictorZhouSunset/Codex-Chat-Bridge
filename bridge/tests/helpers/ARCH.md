@@ -6,5 +6,5 @@ When a helper starts encoding product policy instead of fake I/O shape, move tha
 
 | file name | position | function |
 | --- | --- | --- |
-| `bridge-service-fixtures.mjs` | bridge runtime fixture bundle | Provides fake Telegram APIs, fake Codex clients, temporary state paths, and manual clock helpers for bridge runtime tests. |
+| `bridge-service-fixtures.mjs` | bridge runtime fixture bundle | Provides fake Telegram APIs, fake Codex clients, interruptible relay stubs, temporary state paths, and manual clock helpers for bridge runtime tests. |
 | `codex-app-server-fixtures.mjs` | app-server fixture bundle | Provides fake JSON-RPC Codex processes for client lifecycle, progress, access, and interactive request tests. |

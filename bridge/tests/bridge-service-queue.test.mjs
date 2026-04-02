@@ -10,6 +10,7 @@ import {
   createFakeCodexClient,
   createFakeTelegramApi,
   createQueuedCodexClient,
+  createSessionAwareCodexClient,
   createTestStatePath,
 } from "./helpers/bridge-service-fixtures.mjs";
 
@@ -47,6 +48,53 @@ test("queues a telegram message when the bound thread is already in progress", a
   codexClient.threadStatus = "idle";
   await relay.completion;
   assert.deepEqual(codexClient.relayCalls, [
+    {
+      threadId: "thread-123",
+      text: "another message",
+    },
+  ]);
+});
+
+test("queues behind an attached-thread turn that is already running before the local worker starts", async (t) => {
+  const statePath = await createTestStatePath(t);
+  const codexClient = createSessionAwareCodexClient({
+    externalActiveTurn: {
+      threadId: "thread-123",
+      turnId: "turn-external",
+    },
+  });
+  const telegramApi = createFakeTelegramApi();
+  const service = new BridgeService({
+    statePath,
+    codexClient,
+    telegramApi,
+    threadPollIntervalMs: 0,
+    waitFn: async () => {
+      codexClient.clearExternalActiveTurn();
+    },
+  });
+
+  await service.attach({
+    chatId: "1001",
+    threadId: "thread-123",
+    threadLabel: "Project A",
+    cwd: "D:\\project-a",
+  });
+
+  const relay = await service.handleTelegramMessage({
+    chatId: "1001",
+    text: "another message",
+  });
+
+  assert.deepEqual(codexClient.relayCalls, []);
+  assert.equal(
+    telegramApi.sent.some(({ text }) => text === "（codex还在运行上一个turn，结束后消息会送达codex）"),
+    true,
+  );
+
+  await relay.completion;
+
+  assert.deepEqual(codexClient.relayCalls.map(({ threadId, text }) => ({ threadId, text })), [
     {
       threadId: "thread-123",
       text: "another message",

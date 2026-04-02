@@ -16,6 +16,44 @@ export async function fetchBridgeStatus({ controlPort, fetchImpl = fetch }) {
   return response.json();
 }
 
+export async function attachBridgeBinding({ controlPort, binding, fetchImpl = fetch }) {
+  const response = await fetchImpl(`http://127.0.0.1:${controlPort}/attach`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(binding),
+  });
+
+  const body = await readJsonBody(response);
+  if (!response.ok) {
+    const error = new Error(body?.error ?? `Failed to attach Telegram bridge on port ${controlPort}.`);
+    if (body?.code) {
+      error.code = body.code;
+    }
+    if (body?.binding) {
+      error.binding = body.binding;
+    }
+    throw error;
+  }
+
+  return body.binding;
+}
+
+export async function detachBridgeBinding({ controlPort, chatId, fetchImpl = fetch }) {
+  const response = await fetchImpl(`http://127.0.0.1:${controlPort}/detach`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ chatId }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to detach Telegram bridge on port ${controlPort}.`);
+  }
+}
+
 export async function ensureBridgeRunning({
   controlPort,
   fetchImpl = fetch,
@@ -62,4 +100,12 @@ function delay(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+async function readJsonBody(response) {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
 }

@@ -6,6 +6,6 @@ Its docs should track operator-facing workflows, recovery steps, and command exp
 
 | file name | position | function |
 | --- | --- | --- |
-| `SKILL.md` | primary skill contract | Tells Codex when and how to invoke the installed bridge commands. |
+| `SKILL.md` | primary skill contract | Tells Codex when and how to invoke the installed bridge commands, including explicit attach-time permission forwarding and attach-means-session-ready semantics. |
 | `agents/openai.yaml` | model metadata | Declares the skill’s target agent metadata. |
-| `references/protocol.md` | operator reference | Documents attach, detach, recovery, and runtime behavior details for the skill. |
+| `references/protocol.md` | operator reference | Documents attach, detach, recovery, degraded runtime behavior, and explicit attach access rules for the skill. |

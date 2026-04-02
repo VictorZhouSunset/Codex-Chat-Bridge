@@ -13,7 +13,14 @@ import { buildAttachReadyMessage, shouldSendAttachReadyMessage } from "./attach-
 import { BridgeService } from "./bridge-service.mjs";
 import { createControlServer, shouldKeepServing } from "./control-server.mjs";
 import { CodexAppServerClient } from "./codex-app-server.mjs";
-import { ensureBridgeRunning, fetchBridgeStatus, isBridgeHealthy, stopBridge } from "./daemon-control.mjs";
+import {
+  attachBridgeBinding,
+  detachBridgeBinding,
+  ensureBridgeRunning,
+  fetchBridgeStatus,
+  isBridgeHealthy,
+  stopBridge,
+} from "./daemon-control.mjs";
 import { observeRelayCompletion } from "./relay-result.mjs";
 import { fetchAndProcessTelegramUpdates } from "./serve-loop.mjs";
 import { TelegramApi } from "./telegram-api.mjs";
@@ -23,6 +30,7 @@ import {
   getControlPort,
   isAllowedChat,
   parseArgs,
+  resolveExplicitAttachAccessArgs,
   resolveAttachInputs,
 } from "./cli-support.mjs";
 import { resolveAttachAccessContext } from "./desktop-access-context.mjs";
@@ -76,6 +84,7 @@ async function attachCommand(args) {
     config,
     env: process.env,
   });
+  const explicitAccess = resolveExplicitAttachAccessArgs(args);
   const wasHealthy = await isBridgeHealthy({ controlPort });
   const existingBinding = chatId ? await getBinding(statePath, chatId) : null;
 
@@ -96,24 +105,21 @@ async function attachCommand(args) {
   }
 
   const accessContext = resolveAttachAccessContext({
-    env: process.env,
+    explicitAccess,
     cwd: args.cwd ?? thread.cwd ?? process.cwd(),
-  });
-
-  const service = new BridgeService({
-    statePath,
-    codexClient: null,
-    telegramApi: null,
   });
 
   let binding;
   try {
-    binding = await service.attach({
-      chatId,
-      threadId,
-      threadLabel: args["thread-label"] ?? thread.name ?? thread.preview,
-      cwd: args.cwd ?? thread.cwd ?? process.cwd(),
-      access: accessContext.access,
+    binding = await attachBridgeBinding({
+      controlPort,
+      binding: {
+        chatId,
+        threadId,
+        threadLabel: args["thread-label"] ?? thread.name ?? thread.preview,
+        cwd: args.cwd ?? thread.cwd ?? process.cwd(),
+        access: accessContext.access,
+      },
     });
   } catch (error) {
     if (error?.code === "BINDING_CONFLICT") {
@@ -156,12 +162,17 @@ async function detachCommand(args) {
     throw new Error("detach requires --chat-id or config.defaultChatId.");
   }
 
-  const service = new BridgeService({
-    statePath,
-    codexClient: null,
-    telegramApi: null,
-  });
-  await service.detach(chatId);
+  const controlPort = config ? getControlPort(config) : null;
+  if (controlPort && (await isBridgeHealthy({ controlPort }))) {
+    await detachBridgeBinding({ controlPort, chatId });
+  } else {
+    const service = new BridgeService({
+      statePath,
+      codexClient: null,
+      telegramApi: null,
+    });
+    await service.detach(chatId);
+  }
   console.log(`Detached Telegram chat ${chatId}.`);
 }
 
@@ -249,7 +260,9 @@ async function serveCommand() {
   const telegramApi = new TelegramApi({ token: config.telegramBotToken });
   try {
     await telegramApi.setMyCommands([
+      { command: "status", description: "Show bridge status for the current chat" },
       { command: "cancel", description: "Cancel the pending approval or question" },
+      { command: "interrupt", description: "Interrupt the active turn and clear queued messages" },
       { command: "detach", description: "Detach Telegram from the current Codex thread" },
       { command: "permission", description: "Show or change bridge permission profile" },
     ]);

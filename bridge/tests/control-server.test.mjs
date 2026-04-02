@@ -63,6 +63,8 @@ test("GET /status returns runtime mode, queue depth, pending interactive count, 
     queueDepth: 2,
     pendingInteractiveCount: 1,
     shutdownSource: "tray",
+    attachedSession: null,
+    activeRelays: [],
     binding: {
       chatId: "1001",
       threadId: "thread-123",
@@ -145,6 +147,90 @@ test("POST /shutdown enters draining when busy", async () => {
   assert.equal(response.body.mode, "draining");
   assert.equal(response.body.shutdownSource, "tray");
   assert.equal(response.body.safeToStop, false);
+});
+
+test("POST /attach delegates binding creation to the live bridge service", async () => {
+  const requests = [];
+  const bridgeService = {
+    async attach(binding) {
+      requests.push(binding);
+      return {
+        ...binding,
+        attachedAt: "2026-04-01T00:00:00.000Z",
+      };
+    },
+    async getRuntimeStatus() {
+      return {
+        mode: "idle",
+        queueDepth: 0,
+      };
+    },
+  };
+
+  const response = await resolveControlResponse({
+    method: "POST",
+    url: "/attach",
+    body: {
+      chatId: "1001",
+      threadId: "thread-a",
+      threadLabel: "Project A",
+      cwd: "/tmp/project-a",
+      access: null,
+    },
+    bridgeService,
+  });
+
+  assert.deepEqual(requests, [
+    {
+      chatId: "1001",
+      threadId: "thread-a",
+      threadLabel: "Project A",
+      cwd: "/tmp/project-a",
+      access: null,
+    },
+  ]);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, {
+    ok: true,
+    binding: {
+      chatId: "1001",
+      threadId: "thread-a",
+      threadLabel: "Project A",
+      cwd: "/tmp/project-a",
+      access: null,
+      attachedAt: "2026-04-01T00:00:00.000Z",
+    },
+  });
+});
+
+test("POST /detach delegates to the live bridge service", async () => {
+  const detached = [];
+  const bridgeService = {
+    async detach(chatId) {
+      detached.push(chatId);
+    },
+    async getRuntimeStatus() {
+      return {
+        mode: "idle",
+        queueDepth: 0,
+      };
+    },
+  };
+
+  const response = await resolveControlResponse({
+    method: "POST",
+    url: "/detach",
+    body: {
+      chatId: "1001",
+    },
+    bridgeService,
+  });
+
+  assert.deepEqual(detached, ["1001"]);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, {
+    ok: true,
+  });
 });
 
 test("the serve loop keeps running until the bridge reports ready_to_stop", () => {

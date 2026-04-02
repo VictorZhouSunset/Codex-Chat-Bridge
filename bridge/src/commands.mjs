@@ -1,3 +1,7 @@
+// input: raw Telegram command text or callback payloads
+// output: normalized bridge command intents for relay, detach, cancel, interrupt, and permission handling
+// pos: tiny Telegram command classifier shared by the runtime and tests
+// 一旦我被更新，务必更新我的开头注释以及所属文件夹的md。
 const DETACH_PHRASES = new Set([
   "detach",
   "stop",
@@ -40,6 +44,13 @@ export function classifyTelegramText(text) {
   if (normalizedText === "/cancel") {
     return {
       kind: "cancel",
+      normalizedText,
+    };
+  }
+
+  if (normalizedText === "/interrupt") {
+    return {
+      kind: "interrupt",
       normalizedText,
     };
   }

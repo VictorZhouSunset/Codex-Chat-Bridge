@@ -10,6 +10,7 @@ import {
   getControlPort,
   isAllowedChat,
   parseArgs,
+  resolveExplicitAttachAccessArgs,
   resolveAttachInputs,
 } from "../src/cli-support.mjs";
 
@@ -82,5 +83,38 @@ test("resolveAttachInputs prefers args and validates both chat and thread ids", 
         env: {},
       }),
     /attach requires --thread-id or CODEX_THREAD_ID\./i,
+  );
+});
+
+test("resolveExplicitAttachAccessArgs parses explicit attach access flags and rejects invalid values", () => {
+  assert.deepEqual(
+    resolveExplicitAttachAccessArgs({
+      "approval-policy": "never",
+      "sandbox-mode": "danger-full-access",
+    }),
+    {
+      approvalPolicy: "never",
+      sandboxMode: "danger-full-access",
+    },
+  );
+
+  assert.equal(resolveExplicitAttachAccessArgs({}), null);
+
+  assert.throws(
+    () =>
+      resolveExplicitAttachAccessArgs({
+        "approval-policy": "invalid",
+        "sandbox-mode": "danger-full-access",
+      }),
+    /Invalid --approval-policy/i,
+  );
+
+  assert.throws(
+    () =>
+      resolveExplicitAttachAccessArgs({
+        "approval-policy": "never",
+        "sandbox-mode": "bad-mode",
+      }),
+    /Invalid --sandbox-mode/i,
   );
 });

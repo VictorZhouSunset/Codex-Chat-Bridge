@@ -36,25 +36,28 @@ node "$BRIDGE_ROOT/src/cli.mjs" status
 3. If the same thread is already attached and `serviceHealthy` is `true`, report that Telegram is already pointed at the current thread.
 4. If the same thread is already attached but `serviceHealthy` is `false`, do not stop at status. Recover the daemon first by running `start-service`, then re-check `status`, and only then report readiness.
 5. If a different thread is attached and the user explicitly wants to switch Telegram to the current thread, Codex may perform `detach` and then `attach` on the user's behalf as part of fulfilling that request.
-6. Run the attach command that matches the current shell:
+6. If Codex knows the current session approval policy and sandbox mode from runtime context, it must pass them explicitly into the attach command instead of relying on shell environment variables. Replace the example values below with the real values from the current session.
+7. Run the attach command that matches the current shell:
 
 ```powershell
 $bridgeRoot = Join-Path $HOME '.codex\telegram-bridge'
-node (Join-Path $bridgeRoot 'src\cli.mjs') attach
+node (Join-Path $bridgeRoot 'src\cli.mjs') attach --approval-policy never --sandbox-mode danger-full-access
 ```
 
 ```sh
 BRIDGE_ROOT="$HOME/.codex/telegram-bridge"
-node "$BRIDGE_ROOT/src/cli.mjs" attach
+node "$BRIDGE_ROOT/src/cli.mjs" attach --approval-policy never --sandbox-mode danger-full-access
 ```
 
-7. `attach` will automatically start the local bridge daemon in the background if it is not already running.
-8. While a thread is attached, the bridge will also launch a temporary tray/menu-bar companion.
-9. Once the final Telegram binding is detached, the bridge and tray will auto-exit.
-10. A successful fresh attach, or a same-thread daemon recovery, will also send a Telegram ready message with the current project name and thread label.
-11. The ready message now also includes the thread id and the current access summary used for future Telegram relays.
-12. If desktop Codex permission context cannot be read at attach time, the bridge must fall back to `readonly` and say so explicitly in the Telegram ready message.
-13. Report the attached thread id and remind the user that Telegram messages will continue the same thread.
+8. `attach` will automatically start the local bridge daemon in the background if it is not already running.
+9. While a thread is attached, the bridge will also launch a temporary tray/menu-bar companion.
+10. Once the final Telegram binding is detached, the bridge and tray will auto-exit.
+11. A successful fresh attach, or a same-thread daemon recovery, must leave the bridge-side Codex session ready for that thread before reporting success.
+12. A successful fresh attach, or a same-thread daemon recovery, will also send a Telegram ready message with the current project name and thread label.
+13. The ready message now also includes the thread id and the current access summary used for future Telegram relays.
+14. If Codex did not write the current session permission into the attach command, the bridge must fall back to `readonly` and say so explicitly in the Telegram ready message.
+15. If Codex writes malformed permission parameters, the CLI should fail loudly so Codex can retry with corrected values.
+16. Report the attached thread id and remind the user that Telegram messages will continue the same thread.
 
 If the user wants to stop Telegram relay for the current default chat:
 
@@ -83,9 +86,10 @@ node "$BRIDGE_ROOT/src/cli.mjs" status
 The returned status now reflects live bridge runtime details such as:
 
 - whether the bridge process is healthy
-- whether it is `idle`, `busy`, `draining`, or `ready_to_stop`
+- whether it is `idle`, `busy`, `draining`, `degraded`, or `ready_to_stop`
 - the current queue depth
 - the currently attached binding
+- whether the bridge-side Codex session is actually ready for that thread
 
 If the user explicitly wants manual daemon control:
 
@@ -130,14 +134,17 @@ Do not put real tokens into the skill file.
 - If `CODEX_THREAD_ID` is missing, stop and tell the user the current environment does not expose the active thread id.
 - If shell type is known, choose the matching command form instead of guessing.
 - Attach only on explicit user intent.
-- The bridge is single-binding per Telegram chat.
+- The bridge keeps one active attached thread session at a time.
 - Do not silently replace an existing different-thread binding with a new attach.
 - If Telegram is already attached to another thread and the user explicitly wants to switch, prefer `status -> detach -> attach`.
 - Codex may perform that detach-then-attach sequence automatically when the user has clearly asked to move Telegram to the current thread.
 - If the current thread is already the attached thread, treat attach as an idempotent no-op and report that status clearly.
 - If the current thread is already attached but `serviceHealthy` is `false`, prefer `start-service -> status` before telling the user Telegram is ready.
+- If the bridge is healthy but `mode` is `degraded`, do not claim Telegram is ready; tell the user to re-run `attach` from the current Codex thread so the bridge-side session is prepared again.
 - Do not infer attach-time permission defaults from `codex app-server` resume results.
-- Prefer explicit desktop Codex permission context when it is available; otherwise use `readonly` as the fixed fallback.
+- Prefer explicit Codex runtime permission arguments on the attach command.
+- If Codex does not provide explicit permission arguments, use `readonly` as the fixed fallback and surface that fact in the Telegram ready message.
+- If Codex provides explicit permission arguments but they are malformed, let the CLI fail instead of silently downgrading.
 
 ## Telegram Behavior
 
@@ -145,10 +152,14 @@ Once attached, the Telegram bridge will:
 
 - relay normal text messages into the same Codex thread
 - support `/help` to summarize the Telegram bridge commands
-- support `/status` to inspect the current binding, runtime mode, queue depth, pending prompts, and access profile
+- support `/status` to inspect the current binding, runtime mode, queue depth, pending prompts, access profile, and active turn runtime when available
+- `/status` should reflect the currently attached thread and its current running turn when known
 - support `/changes` to inspect concise git-style workspace changes from the attached project
 - support `/last-error` to inspect the most recent bridge error recorded for this Telegram chat
 - support `/cancel` for deterministic cancellation of a pending approval or question
+- support `/interrupt` to stop the current running turn and clear queued Telegram messages so the user can resend cleanly
+- `/interrupt` should act on the currently attached thread's running turn, even if the current bridge process did not start that turn
+- if the session is degraded, `/interrupt` should tell the user to re-attach instead of attempting hidden recovery
 - support `/detach` as a deterministic detach alias
 - support `/permission` to inspect the current bridge-side access profile and show an inline chooser for future Telegram relays
 - detach on `回到 Codex`

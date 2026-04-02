@@ -1,20 +1,31 @@
-// input: desktop Codex permission environment variables and optional cwd context
+// input: explicit attach-time Codex session permission arguments and optional cwd context
 // output: attach-time bridge access defaults plus an optional fallback notice for Telegram
 // pos: desktop integration helper that keeps Telegram attach access aligned with the local Codex session when possible
 // 一旦我被更新，务必更新我的开头注释以及所属文件夹的md。
 import { createAccessState } from "./access-profile.mjs";
 
 export function resolveAttachAccessContext({
-  env = process.env,
+  explicitAccess = null,
   cwd,
 } = {}) {
-  const approvalPolicy = normalizeApprovalPolicy(env.CODEX_APPROVAL_POLICY);
-  const sandboxPolicy = normalizeSandboxPolicy({
-    rawSandboxPolicy: env.CODEX_SANDBOX_POLICY,
-    cwd,
-  });
+  if (explicitAccess) {
+    const approvalPolicy = normalizeApprovalPolicy(explicitAccess.approvalPolicy);
+    if (!approvalPolicy) {
+      throw new Error(
+        "Invalid --approval-policy. Expected one of: never, on-request, on-failure, untrusted.",
+      );
+    }
 
-  if (approvalPolicy && sandboxPolicy) {
+    const sandboxPolicy = normalizeSandboxPolicy({
+      rawSandboxPolicy: explicitAccess.sandboxMode,
+      cwd,
+    });
+    if (!sandboxPolicy) {
+      throw new Error(
+        "Invalid --sandbox-mode. Expected one of: read-only, workspace-write, danger-full-access.",
+      );
+    }
+
     return {
       access: createAccessState({
         approvalPolicy,
@@ -33,7 +44,7 @@ export function resolveAttachAccessContext({
         networkAccess: false,
       },
     }),
-    notice: "读取桌面端权限失败，采用默认权限 readonly",
+    notice: "Codex 未写入当前会话权限，采用默认权限 readonly",
   };
 }
 

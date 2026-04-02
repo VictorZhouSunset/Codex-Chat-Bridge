@@ -7,9 +7,8 @@ import assert from "node:assert/strict";
 
 import { resolveAttachAccessContext } from "../src/desktop-access-context.mjs";
 
-test("falls back to readonly access with a warning when desktop access is unavailable", () => {
+test("falls back to readonly access with a warning when Codex does not provide explicit access", () => {
   const result = resolveAttachAccessContext({
-    env: {},
     cwd: "D:\\project-a",
   });
 
@@ -23,15 +22,15 @@ test("falls back to readonly access with a warning when desktop access is unavai
     overrideApprovalPolicy: null,
     overrideSandboxPolicy: null,
   });
-  assert.match(result.notice, /读取桌面端权限失败/);
+  assert.match(result.notice, /Codex 未写入当前会话权限/);
   assert.match(result.notice, /readonly/);
 });
 
-test("uses desktop Codex access when explicit permission env vars are available", () => {
+test("uses explicit attach access arguments when Codex provides them", () => {
   const result = resolveAttachAccessContext({
-    env: {
-      CODEX_APPROVAL_POLICY: "never",
-      CODEX_SANDBOX_POLICY: "danger-full-access",
+    explicitAccess: {
+      approvalPolicy: "never",
+      sandboxMode: "danger-full-access",
     },
     cwd: "D:\\project-a",
   });
@@ -45,11 +44,11 @@ test("uses desktop Codex access when explicit permission env vars are available"
   assert.equal(result.notice, null);
 });
 
-test("maps desktop workspace-write sandbox into the bridge access state", () => {
+test("maps explicit workspace-write sandbox into the bridge access state", () => {
   const result = resolveAttachAccessContext({
-    env: {
-      CODEX_APPROVAL_POLICY: "on-request",
-      CODEX_SANDBOX_POLICY: "workspace-write",
+    explicitAccess: {
+      approvalPolicy: "on-request",
+      sandboxMode: "workspace-write",
     },
     cwd: "D:\\project-a",
   });
@@ -68,4 +67,30 @@ test("maps desktop workspace-write sandbox into the bridge access state", () => 
     overrideSandboxPolicy: null,
   });
   assert.equal(result.notice, null);
+});
+
+test("throws when explicit attach access is malformed", () => {
+  assert.throws(
+    () =>
+      resolveAttachAccessContext({
+        explicitAccess: {
+          approvalPolicy: "bad-policy",
+          sandboxMode: "danger-full-access",
+        },
+        cwd: "D:\\project-a",
+      }),
+    /Invalid --approval-policy/i,
+  );
+
+  assert.throws(
+    () =>
+      resolveAttachAccessContext({
+        explicitAccess: {
+          approvalPolicy: "never",
+          sandboxMode: "bad-sandbox",
+        },
+        cwd: "D:\\project-a",
+      }),
+    /Invalid --sandbox-mode/i,
+  );
 });

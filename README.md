@@ -100,12 +100,14 @@ Each handoff can point to a different Codex thread, while still using the same T
 当前能力：
 
 - 同一个 thread 从 Codex 切到 Telegram
+- `attach` 成功即代表 bridge 侧 Codex session 已为该 thread 准备完成
 - queueing 和进度更新
 - `/help`
 - `/status`
 - `/changes`
 - `/last-error`
 - `/cancel`
+- `/interrupt`
 - `/detach`
 - `/permission`，并带 `default`、`readonly`、`workspace`、`full` 的 inline chooser
 - bridge 运行期间的 tray / menu-bar companion
@@ -120,12 +122,14 @@ Current adapter:
 Current capabilities:
 
 - same-thread handoff from Codex to Telegram
+- `attach` success means the bridge-side Codex session is already prepared for that thread
 - queueing and progress updates
 - `/help`
 - `/status`
 - `/changes`
 - `/last-error`
 - `/cancel`
+- `/interrupt`
 - `/detach`
 - `/permission` with an inline chooser for `default`, `readonly`, `workspace`, and `full`
 - a temporary tray or menu-bar companion while the bridge is running

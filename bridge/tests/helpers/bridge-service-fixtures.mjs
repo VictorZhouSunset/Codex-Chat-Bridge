@@ -1,5 +1,5 @@
 // input: bridge runtime test cases that need fake Telegram APIs, fake Codex clients, and temp state files
-// output: reusable deterministic fixtures for queueing, progress, shutdown, and interactive bridge tests
+// output: reusable deterministic fixtures for queueing, progress, shutdown, interrupt, and interactive bridge tests
 // pos: shared test helper module for concern-based bridge-service suites
 // 一旦我被更新，务必更新我的开头注释以及所属文件夹的md。
 import os from "node:os";
@@ -9,12 +9,32 @@ import { mkdtemp, rm } from "node:fs/promises";
 export function createFakeCodexClient() {
   return {
     relayCalls: [],
+    attachedSessions: [],
     threadStatus: "idle",
+    async attachThreadSession(payload) {
+      this.attachedSessions.push(payload);
+      return {
+        threadId: payload.threadId,
+        approvalPolicy: payload.approvalPolicy,
+        sandboxPolicy: payload.sandboxPolicy,
+        cwd: payload.cwd ?? null,
+      };
+    },
     async readThread(threadId) {
       return {
         id: threadId,
         status: this.threadStatus,
       };
+    },
+    async inspectActiveTurn(threadId) {
+      if (this.threadStatus === "inProgress") {
+        return {
+          id: "turn-external",
+          status: "inProgress",
+          threadId,
+        };
+      }
+      return null;
     },
     async relayText(payload) {
       this.relayCalls.push({
@@ -91,6 +111,16 @@ export async function createTestStatePath(t) {
 export function createImmediateCodexClient() {
   return {
     relayCalls: [],
+    attachedSessions: [],
+    async attachThreadSession(payload) {
+      this.attachedSessions.push(payload);
+      return {
+        threadId: payload.threadId,
+        approvalPolicy: payload.approvalPolicy,
+        sandboxPolicy: payload.sandboxPolicy,
+        cwd: payload.cwd ?? null,
+      };
+    },
     async readThread(threadId) {
       return {
         id: threadId,
@@ -118,12 +148,32 @@ export function createQueuedCodexClient() {
 
   return {
     relayCalls: [],
+    attachedSessions: [],
     threadStatus: "idle",
+    async attachThreadSession(payload) {
+      this.attachedSessions.push(payload);
+      return {
+        threadId: payload.threadId,
+        approvalPolicy: payload.approvalPolicy,
+        sandboxPolicy: payload.sandboxPolicy,
+        cwd: payload.cwd ?? null,
+      };
+    },
     async readThread(threadId) {
       return {
         id: threadId,
         status: this.threadStatus,
       };
+    },
+    async inspectActiveTurn(threadId) {
+      if (this.threadStatus === "inProgress") {
+        return {
+          id: "turn-external",
+          status: "inProgress",
+          threadId,
+        };
+      }
+      return null;
     },
     async relayText(payload) {
       this.relayCalls.push({
@@ -154,6 +204,177 @@ export function createQueuedCodexClient() {
         return;
       }
       releaseRequested = true;
+    },
+  };
+}
+
+export function createInterruptibleQueuedCodexClient() {
+  let pendingReject;
+  let pendingResolve;
+  let pendingThreadId = null;
+  let interrupted = false;
+
+  return {
+    relayCalls: [],
+    attachedSessions: [],
+    interrupts: [],
+    async attachThreadSession(payload) {
+      this.attachedSessions.push(payload);
+      return {
+        threadId: payload.threadId,
+        approvalPolicy: payload.approvalPolicy,
+        sandboxPolicy: payload.sandboxPolicy,
+        cwd: payload.cwd ?? null,
+      };
+    },
+    async readThread(threadId) {
+      return {
+        id: threadId,
+        status: pendingThreadId === threadId ? "inProgress" : "idle",
+      };
+    },
+    async inspectActiveTurn(threadId) {
+      if (pendingThreadId === threadId) {
+        return {
+          id: "turn-interruptible",
+          status: "inProgress",
+          threadId,
+        };
+      }
+      return null;
+    },
+    async interruptTurn(payload) {
+      this.interrupts.push(payload);
+      interrupted = true;
+      const error = new Error("Turn interrupted by Telegram user.");
+      error.code = "TURN_INTERRUPTED";
+      pendingThreadId = null;
+      pendingReject?.(error);
+      return { interrupted: true };
+    },
+    async relayText(payload) {
+      this.relayCalls.push({
+        threadId: payload.threadId,
+        text: payload.text,
+      });
+      pendingThreadId = payload.threadId;
+      await payload.onTurnStarted?.({
+        threadId: payload.threadId,
+        turnId: "turn-interruptible",
+      });
+
+      return new Promise((resolve, reject) => {
+        pendingResolve = (result) => {
+          pendingThreadId = null;
+          resolve(result);
+        };
+        pendingReject = (error) => {
+          pendingThreadId = null;
+          reject(error);
+        };
+
+        if (interrupted) {
+          const error = new Error("Turn interrupted by Telegram user.");
+          error.code = "TURN_INTERRUPTED";
+          pendingReject(error);
+          return;
+        }
+
+        void payload.onProgress?.("正在读取 thread\n（持续工作中）");
+      });
+    },
+    releaseRelay() {
+      pendingResolve?.({
+        threadId: pendingThreadId,
+        turnId: "turn-interruptible",
+        text: "echo:released",
+      });
+    },
+  };
+}
+
+export function createFailingAttachCodexClient(message = "attach session failed") {
+  return {
+    attachedSessions: [],
+    async attachThreadSession(payload) {
+      this.attachedSessions.push(payload);
+      throw new Error(message);
+    },
+  };
+}
+
+export function createSessionAwareCodexClient(options = {}) {
+  let externalActiveTurn = options.externalActiveTurn ?? null;
+  let attachedThreadId = options.attachedThreadId ?? null;
+  let attached = attachedThreadId ? {
+    threadId: attachedThreadId,
+    approvalPolicy: options.approvalPolicy ?? "never",
+    sandboxPolicy: options.sandboxPolicy ?? { type: "dangerFullAccess" },
+    cwd: options.cwd ?? "D:\\project-a",
+  } : null;
+
+  return {
+    attachedSessions: [],
+    relayCalls: [],
+    interrupts: [],
+    async attachThreadSession(payload) {
+      attached = {
+        threadId: payload.threadId,
+        approvalPolicy: payload.approvalPolicy,
+        sandboxPolicy: payload.sandboxPolicy,
+        cwd: payload.cwd ?? null,
+      };
+      attachedThreadId = payload.threadId;
+      this.attachedSessions.push(payload);
+      return attached;
+    },
+    async relayText(payload) {
+      this.relayCalls.push(payload);
+      if (!attached || attached.threadId !== payload.threadId) {
+        const error = new Error("Attached thread session is not ready.");
+        error.code = "THREAD_SESSION_NOT_READY";
+        throw error;
+      }
+      return {
+        threadId: payload.threadId,
+        turnId: "turn-session-aware",
+        text: `echo:${payload.text}`,
+      };
+    },
+    async interruptTurn(payload) {
+      this.interrupts.push(payload);
+      if (!attached || attached.threadId !== payload.threadId) {
+        const error = new Error("Attached thread session is not ready.");
+        error.code = "THREAD_SESSION_NOT_READY";
+        throw error;
+      }
+      if (externalActiveTurn && payload.threadId === externalActiveTurn.threadId) {
+        externalActiveTurn = null;
+      }
+      return { interrupted: true };
+    },
+    async inspectActiveTurn(threadId) {
+      if (externalActiveTurn && threadId === externalActiveTurn.threadId) {
+        return {
+          id: externalActiveTurn.turnId,
+          status: "inProgress",
+          threadId,
+        };
+      }
+      return null;
+    },
+    getAttachedThreadSession() {
+      return attached;
+    },
+    clearAttachedThreadSession() {
+      attached = null;
+      attachedThreadId = null;
+    },
+    clearExternalActiveTurn() {
+      externalActiveTurn = null;
+    },
+    setExternalActiveTurn(turn) {
+      externalActiveTurn = turn;
     },
   };
 }
@@ -287,29 +508,24 @@ export function createFailingShutdownTelegramApi() {
 }
 
 export function createReadThreadFailsDuringWorkerCodexClient() {
-  let readCount = 0;
   return {
+    attachedSessions: [],
     relayCalls: [],
-    async readThread(threadId) {
-      readCount += 1;
-      if (readCount === 1) {
-        return {
-          id: threadId,
-          status: "idle",
-        };
-      }
-      throw new Error("thread lookup failed");
+    async attachThreadSession(payload) {
+      this.attachedSessions.push(payload);
+      return {
+        threadId: payload.threadId,
+        approvalPolicy: payload.approvalPolicy,
+        sandboxPolicy: payload.sandboxPolicy,
+        cwd: payload.cwd ?? null,
+      };
     },
     async relayText(payload) {
       this.relayCalls.push({
         threadId: payload.threadId,
         text: payload.text,
       });
-      return {
-        threadId: payload.threadId,
-        turnId: "turn-never",
-        text: `echo:${payload.text}`,
-      };
+      throw new Error("thread lookup failed");
     },
   };
 }

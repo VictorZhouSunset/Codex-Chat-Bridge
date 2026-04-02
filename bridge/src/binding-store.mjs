@@ -50,6 +50,28 @@ export async function attachBinding(statePath, binding) {
   return state.activeBindings[binding.chatId];
 }
 
+export async function replaceAllBindingsWith(statePath, binding) {
+  const state = await readState(statePath);
+  const existingBinding = state.activeBindings[binding.chatId] ?? null;
+  const attachedAt =
+    existingBinding?.threadId === binding.threadId
+      ? existingBinding.attachedAt
+      : new Date().toISOString();
+
+  state.activeBindings = {
+    [binding.chatId]: {
+      chatId: binding.chatId,
+      threadId: binding.threadId,
+      threadLabel: binding.threadLabel ?? null,
+      cwd: binding.cwd ?? null,
+      access: binding.access ?? null,
+      attachedAt,
+    },
+  };
+  await writeState(statePath, state);
+  return state.activeBindings[binding.chatId];
+}
+
 export async function detachBinding(statePath, chatId) {
   const state = await readState(statePath);
   delete state.activeBindings[chatId];
@@ -90,6 +112,27 @@ export async function updateLastRelayRecord(statePath, chatId, updater) {
   state.lastRelayByChat[chatId] = updater(state.lastRelayByChat[chatId] ?? null);
   await writeState(statePath, state);
   return state.lastRelayByChat[chatId];
+}
+
+export async function writeTelegramRuntimeState(
+  statePath,
+  state,
+  {
+    readStateFn = readState,
+    writeStateFn = writeState,
+  } = {},
+) {
+  let currentState;
+  try {
+    currentState = await readStateFn(statePath);
+  } catch {
+    currentState = createEmptyState();
+  }
+
+  currentState.telegramOffset = state.telegramOffset ?? 0;
+  currentState.updateFailureCounts = structuredClone(state.updateFailureCounts ?? {});
+  await writeStateFn(statePath, currentState);
+  return currentState;
 }
 
 export async function readState(statePath) {

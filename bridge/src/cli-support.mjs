@@ -45,14 +45,56 @@ export function resolveAttachInputs({ args = {}, config = {}, env = process.env 
   };
 }
 
+export function resolveExplicitAttachAccessArgs(args = {}) {
+  const rawApprovalPolicy = `${args["approval-policy"] ?? ""}`.trim();
+  const rawSandboxMode = `${args["sandbox-mode"] ?? ""}`.trim();
+
+  if (!rawApprovalPolicy && !rawSandboxMode) {
+    return null;
+  }
+
+  const approvalPolicy = normalizeApprovalPolicy(rawApprovalPolicy);
+  if (!approvalPolicy) {
+    throw new Error(
+      "Invalid --approval-policy. Expected one of: never, on-request, on-failure, untrusted.",
+    );
+  }
+
+  const sandboxMode = normalizeSandboxMode(rawSandboxMode);
+  if (!sandboxMode) {
+    throw new Error(
+      "Invalid --sandbox-mode. Expected one of: read-only, workspace-write, danger-full-access.",
+    );
+  }
+
+  return {
+    approvalPolicy,
+    sandboxMode,
+  };
+}
+
 export function buildUsageText() {
   return `Usage:
   node src/cli.mjs init-config
   node src/cli.mjs start-service
   node src/cli.mjs stop-service
-  node src/cli.mjs attach [--chat-id <id>] [--thread-id <id>] [--thread-label <label>] [--cwd <path>]
+  node src/cli.mjs attach [--chat-id <id>] [--thread-id <id>] [--thread-label <label>] [--cwd <path>] [--approval-policy <policy>] [--sandbox-mode <mode>]
   node src/cli.mjs detach [--chat-id <id>]
   node src/cli.mjs status [--chat-id <id>]
   node src/cli.mjs inject --chat-id <id> --text <text>
   node src/cli.mjs serve`;
+}
+
+function normalizeApprovalPolicy(value) {
+  if (value === "never" || value === "on-request" || value === "on-failure" || value === "untrusted") {
+    return value;
+  }
+  return null;
+}
+
+function normalizeSandboxMode(value) {
+  if (value === "danger-full-access" || value === "read-only" || value === "workspace-write") {
+    return value;
+  }
+  return null;
 }

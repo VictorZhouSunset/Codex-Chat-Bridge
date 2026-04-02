@@ -7,19 +7,19 @@ When a source module is split, its tests should usually split with it instead of
 | file name | position | function |
 | --- | --- | --- |
 | `bridge-service-binding.test.mjs` | bridge binding suite | Covers attach, detach, relay basics, and permission command behavior. |
-| `bridge-service-diagnostics.test.mjs` | bridge diagnostics suite | Covers help, status, changes, and last-error Telegram command behavior. |
-| `bridge-service-queue.test.mjs` | bridge queue suite | Covers busy-thread queueing and ordered relay execution. |
+| `bridge-service-diagnostics.test.mjs` | bridge diagnostics suite | Covers help, status, degraded-session reporting, current attached-thread runtime reporting, changes, and last-error Telegram command behavior. |
+| `bridge-service-queue.test.mjs` | bridge queue suite | Covers busy-thread queueing, attached-thread busy detection, and ordered relay execution. |
 | `bridge-service-progress.test.mjs` | bridge progress suite | Covers typing-first behavior and throttled Telegram progress updates. |
 | `bridge-service-interactive.test.mjs` | bridge interactive suite | Covers approval routing, user input prompts, and interactive detach behavior. |
-| `bridge-service-lifecycle.test.mjs` | bridge lifecycle suite | Covers draining, shutdown, auto-exit, and worker failure settlement. |
-| `codex-app-server-core.test.mjs` | protocol core suite | Verifies client initialization, thread reads, and resume-before-turn behavior. |
+| `bridge-service-lifecycle.test.mjs` | bridge lifecycle suite | Covers draining, shutdown, singleton attach-session replacement, auto-exit, worker failure settlement, and slash interrupt behavior. |
+| `codex-app-server-core.test.mjs` | protocol core suite | Verifies client initialization, thread reads, attached-session setup, and session-aware relay/interrupt behavior. |
 | `codex-app-server-progress.test.mjs` | protocol progress suite | Verifies JSON-RPC progress aggregation into Telegram-facing summaries. |
 | `codex-app-server-interactive.test.mjs` | protocol interactive suite | Verifies approval and request_user_input server-request handling. |
 | `codex-app-server-access.test.mjs` | protocol access suite | Verifies approval and sandbox override mapping across resume and turn start. |
 | `codex-app-server-protocol.test.mjs` | protocol helper suite | Verifies app-server request normalization and sandbox-mode mapping. |
 | `binding-store.test.mjs` | persistence suite | Verifies binding persistence, conflict handling, and state updates. |
-| `cli-support.test.mjs` | CLI helper suite | Verifies CLI parsing and allowlist/control-port helpers. |
-| `desktop-access-context.test.mjs` | desktop permission suite | Verifies desktop permission detection and readonly fallback for attach-time access. |
+| `cli-support.test.mjs` | CLI helper suite | Verifies CLI parsing, explicit attach-access parsing, and allowlist/control-port helpers. |
+| `desktop-access-context.test.mjs` | attach access suite | Verifies explicit Codex-provided attach access handling, validation, and readonly fallback. |
 | `control-server.test.mjs` | control plane suite | Verifies health, status, and shutdown HTTP responses. |
 | `daemon-control.test.mjs` | daemon client suite | Verifies localhost status/shutdown requests and health checks. |
 | `serve-loop.test.mjs` | Telegram polling suite | Verifies polling, offset progression, and error handling. |

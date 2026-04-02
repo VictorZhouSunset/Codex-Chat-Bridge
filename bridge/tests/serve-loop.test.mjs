@@ -1,11 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
+import { mkdtemp, readFile } from "node:fs/promises";
 
 import {
   fetchAndProcessTelegramUpdates,
   fetchTelegramUpdatesSafe,
   processTelegramUpdateBatch,
 } from "../src/serve-loop.mjs";
+import { attachBinding, createEmptyState, ensureStateFile } from "../src/binding-store.mjs";
 
 test("fetchTelegramUpdatesSafe returns an empty list when polling fails", async () => {
   const observedErrors = [];
@@ -355,4 +359,59 @@ test("processTelegramUpdateBatch still skips a poisoned update when the retry-li
   ]);
   assert.equal(state.telegramOffset, 21);
   assert.deepEqual(state.updateFailureCounts, {});
+});
+
+test("processTelegramUpdateBatch preserves active bindings already written to disk", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tg-bridge-loop-"));
+  const statePath = path.join(tempDir, "state.json");
+  await ensureStateFile(statePath);
+
+  const staleState = createEmptyState();
+  await attachBinding(statePath, {
+    chatId: "1001",
+    threadId: "thread-a",
+    threadLabel: "Project A",
+    cwd: "/tmp/project-a",
+  });
+
+  await processTelegramUpdateBatch({
+    updates: [
+      {
+        update_id: 1,
+        message: {
+          chat: { id: 1001 },
+          text: "hello after attach",
+        },
+      },
+    ],
+    state: staleState,
+    statePath,
+    service: {
+      async handleTelegramMessage() {
+        return {
+          completion: Promise.resolve({ ok: true }),
+        };
+      },
+    },
+    telegramApi: {},
+    config: {},
+    observeRelayCompletionFn: () => {},
+    onError: (error) => {
+      throw error;
+    },
+    isAllowedChat: () => true,
+  });
+
+  const persisted = JSON.parse(await readFile(statePath, "utf8"));
+  assert.equal(persisted.telegramOffset, 2);
+  assert.deepEqual(persisted.activeBindings, {
+    "1001": {
+      chatId: "1001",
+      threadId: "thread-a",
+      threadLabel: "Project A",
+      cwd: "/tmp/project-a",
+      access: null,
+      attachedAt: persisted.activeBindings["1001"].attachedAt,
+    },
+  });
 });

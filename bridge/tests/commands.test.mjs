@@ -19,6 +19,10 @@ test("recognizes slash cancel and slash detach commands", () => {
     kind: "cancel",
     normalizedText: "/cancel",
   });
+  assert.deepEqual(classifyTelegramText("/interrupt"), {
+    kind: "interrupt",
+    normalizedText: "/interrupt",
+  });
   assert.deepEqual(classifyTelegramText("/detach"), {
     kind: "detach",
     normalizedText: "/detach",

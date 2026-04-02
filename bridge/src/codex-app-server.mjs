@@ -1,5 +1,5 @@
 // input: Codex app-server JSON-RPC streams, thread ids, turn input text, and runtime callbacks
-// output: resumed threads, relayed turn results, progress updates, and normalized interactive requests
+// output: resumed threads, relayed turn results, active turn inspection, interruption hooks, progress updates, and normalized interactive requests
 // pos: process adapter between the bridge runtime and the Codex app-server subprocess
 // 一旦我被更新，务必更新我的开头注释以及所属文件夹的md。
 import readline from "node:readline";
@@ -19,6 +19,7 @@ export class CodexAppServerClient {
     this.requestId = 0;
     this.pendingRequests = new Map();
     this.pendingTurns = new Map();
+    this.attachedThreadSession = null;
     this.started = false;
   }
 
@@ -46,12 +47,52 @@ export class CodexAppServerClient {
     this.started = true;
   }
 
-  async readThread(threadId) {
+  async readThread(threadId, options = {}) {
     const result = await this.request("thread/read", {
       threadId,
-      includeTurns: false,
+      includeTurns: options.includeTurns ?? false,
     });
     return result.thread;
+  }
+
+  async inspectActiveTurn(threadId) {
+    const thread = await this.readThread(threadId, { includeTurns: true });
+    const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turn = turns[index];
+      if (turn?.status === "inProgress") {
+        return turn;
+      }
+    }
+    return null;
+  }
+
+  async getActiveTurn(threadId) {
+    return this.inspectActiveTurn(threadId);
+  }
+
+  async attachThreadSession({ threadId, approvalPolicy, sandboxPolicy, cwd }) {
+    await this.resumeThread(threadId, {
+      approvalPolicy,
+      sandboxPolicy,
+      cwd,
+    });
+    this.attachedThreadSession = {
+      threadId,
+      approvalPolicy,
+      sandboxPolicy,
+      cwd: cwd ?? null,
+      sessionReady: true,
+    };
+    return this.getAttachedThreadSession();
+  }
+
+  getAttachedThreadSession() {
+    return this.attachedThreadSession ? { ...this.attachedThreadSession } : null;
+  }
+
+  clearAttachedThreadSession() {
+    this.attachedThreadSession = null;
   }
 
   async resumeThread(threadId, overrides = {}) {
@@ -72,15 +113,12 @@ export class CodexAppServerClient {
     onProgress,
     onInteractiveRequest,
     onInteractiveRequestResolved,
+    onTurnStarted,
     approvalPolicy,
     sandboxPolicy,
     cwd,
   }) {
-    await this.resumeThread(threadId, {
-      approvalPolicy,
-      sandboxPolicy,
-      cwd,
-    });
+    this.#assertAttachedThreadSession(threadId);
 
     const turnPromise = new Promise((resolve, reject) => {
       this.pendingTurns.set(threadId, {
@@ -115,11 +153,16 @@ export class CodexAppServerClient {
     if (pendingTurn) {
       pendingTurn.turnId = result.turn.id;
     }
+    await onTurnStarted?.({
+      threadId,
+      turnId: result.turn.id,
+    });
 
     return turnPromise;
   }
 
   async interruptTurn({ threadId, turnId }) {
+    this.#assertAttachedThreadSession(threadId);
     return this.request("turn/interrupt", {
       threadId,
       turnId,
@@ -132,6 +175,7 @@ export class CodexAppServerClient {
     }
     this.process.stdin?.end();
     this.process.kill?.();
+    this.clearAttachedThreadSession();
     this.started = false;
   }
 
@@ -307,6 +351,17 @@ export class CodexAppServerClient {
         },
       })}\n`,
     );
+  }
+
+  #assertAttachedThreadSession(threadId) {
+    if (
+      !this.attachedThreadSession?.sessionReady ||
+      this.attachedThreadSession.threadId !== threadId
+    ) {
+      const error = new Error(`Attached thread session is not ready for ${threadId}.`);
+      error.code = "THREAD_SESSION_NOT_READY";
+      throw error;
+    }
   }
 }
 

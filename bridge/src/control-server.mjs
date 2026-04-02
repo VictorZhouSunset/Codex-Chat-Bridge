@@ -38,6 +38,39 @@ export async function resolveControlResponse({
     };
   }
 
+  if (method === "POST" && pathName === "/attach") {
+    const attachBody = normalizeJsonBody(body);
+    try {
+      const binding = await bridgeService.attach({
+        chatId: attachBody.chatId,
+        threadId: attachBody.threadId,
+        threadLabel: attachBody.threadLabel ?? null,
+        cwd: attachBody.cwd ?? null,
+        access: attachBody.access ?? null,
+      });
+      return {
+        statusCode: 200,
+        body: {
+          ok: true,
+          binding,
+        },
+      };
+    } catch (error) {
+      return buildErrorResponse(error);
+    }
+  }
+
+  if (method === "POST" && pathName === "/detach") {
+    const detachBody = normalizeJsonBody(body);
+    await bridgeService.detach(detachBody.chatId);
+    return {
+      statusCode: 200,
+      body: {
+        ok: true,
+      },
+    };
+  }
+
   return {
     statusCode: 404,
     body: { ok: false },
@@ -86,6 +119,8 @@ async function buildStatusBody({ bridgeService, readStateFn }) {
     queueDepth: runtime.queueDepth,
     pendingInteractiveCount: runtime.pendingInteractiveCount ?? 0,
     shutdownSource: runtime.shutdownSource ?? null,
+    attachedSession: runtime.attachedSession ?? null,
+    activeRelays: runtime.activeRelays ?? [],
     binding: bindings[0] ?? null,
     bindings,
   };
@@ -127,6 +162,22 @@ function normalizeJsonBody(body) {
   } catch {
     return {};
   }
+}
+
+function buildErrorResponse(error) {
+  if (error?.code === "BINDING_CONFLICT") {
+    return {
+      statusCode: 409,
+      body: {
+        ok: false,
+        error: error.message ?? String(error),
+        code: error.code,
+        binding: error.binding ?? null,
+      },
+    };
+  }
+
+  throw error;
 }
 
 async function readRequestBody(request) {

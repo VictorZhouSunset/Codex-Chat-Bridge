@@ -11,6 +11,7 @@
 ## Runtime Lifecycle
 
 - `attach` auto-starts the bridge process if needed.
+- A successful `attach` means both the Telegram binding and the bridge-side Codex session are ready for the attached thread.
 - When the bridge starts, it also starts a temporary tray companion:
   - Windows: notification area icon
   - macOS: menu-bar icon
@@ -47,14 +48,16 @@ node "$BRIDGE_ROOT/src/cli.mjs" init-config
 
 Attach current thread using `CODEX_THREAD_ID` and default chat:
 
+Replace the example permission values below with the real approval policy and sandbox mode from the current Codex session when they are available.
+
 ```powershell
 $bridgeRoot = Join-Path $HOME '.codex\telegram-bridge'
-node (Join-Path $bridgeRoot 'src\cli.mjs') attach
+node (Join-Path $bridgeRoot 'src\cli.mjs') attach --approval-policy never --sandbox-mode danger-full-access
 ```
 
 ```sh
 BRIDGE_ROOT="$HOME/.codex/telegram-bridge"
-node "$BRIDGE_ROOT/src/cli.mjs" attach
+node "$BRIDGE_ROOT/src/cli.mjs" attach --approval-policy never --sandbox-mode danger-full-access
 ```
 
 This command auto-starts the background bridge service if it is not already healthy.
@@ -62,10 +65,11 @@ The bridge also starts the tray/menu-bar companion automatically for the lifetim
 If the chat is already attached to a different thread, `attach` now refuses to overwrite that binding and instructs the caller to detach first.
 Attach-time permission behavior:
 
-- First try to read desktop Codex permission context.
-- If desktop permission context is unavailable, fall back to `readonly`.
+- Prefer explicit permission arguments written by Codex on the attach command.
+- If Codex does not write attach-time permission arguments, fall back to `readonly`.
 - When that fallback happens, the Telegram ready message includes:
-  `读取桌面端权限失败，采用默认权限 readonly`
+  `Codex 未写入当前会话权限，采用默认权限 readonly`
+- If Codex writes malformed permission arguments, the CLI should fail clearly instead of silently downgrading.
 - Do not use `codex app-server` resume permission data as the default attach permission source.
 
 Attach explicit thread and chat:
@@ -124,6 +128,10 @@ Status returns both binding metadata and live runtime state, including:
 - `mode`
 - `queueDepth`
 - `binding`
+- `attachedSession`
+- `activeRelays`
+
+When `mode` is `degraded`, the bridge still has binding metadata but the bridge-side Codex session is no longer ready. In that state, the correct recovery is to re-run `attach` from the desired Codex thread instead of relying on hidden per-command repair.
 
 Serve:
 
@@ -204,8 +212,12 @@ The Telegram side supports:
 
 - `/help` for a concise bridge command summary
 - `/status` for bridge-local runtime diagnostics
+- `/status` reflects the currently attached thread and the current running turn when known
 - `/changes` for concise git-style workspace changes from the bound project
 - `/last-error` for the most recent bridge-side failure recorded for that chat
 - `/cancel` to cancel a pending interactive approval or question
+- `/interrupt` to stop the current running turn and clear queued Telegram messages
+- `/interrupt` targets the currently attached thread's running turn, even if the current bridge process did not start it
+- `/interrupt` still does not try to implicitly recover a degraded session
 - `/detach` to stop relaying the current Telegram chat
 - `/permission` to inspect or change the access profile used for future Telegram relays

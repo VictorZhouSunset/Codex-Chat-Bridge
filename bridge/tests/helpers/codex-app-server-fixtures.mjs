@@ -230,6 +230,135 @@ export function createResumeRequiredFakeCodexProcess() {
   return fake;
 }
 
+export function createResumeRequiredInterruptFakeCodexProcess() {
+  const fake = createBaseFakeProcess();
+  const resumedThreads = new Set();
+  const seenMethods = [];
+  const rl = readline.createInterface({ input: fake.stdin });
+  rl.on("line", (line) => {
+    const message = JSON.parse(line);
+    seenMethods.push(message.method);
+
+    if (message.method === "initialize") {
+      handleInitialize(fake, message);
+      return;
+    }
+
+    if (message.method === "thread/resume") {
+      resumedThreads.add(message.params.threadId);
+      fake.stdout.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { thread: createFakeThread(message.params.threadId) },
+        })}\n`,
+      );
+      return;
+    }
+
+    if (message.method === "thread/read") {
+      fake.stdout.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            thread: {
+              ...createFakeThread(message.params.threadId),
+              turns: [
+                {
+                  id: "turn-interrupt",
+                  status: "inProgress",
+                  items: [],
+                  input: [],
+                },
+              ],
+            },
+          },
+        })}\n`,
+      );
+      return;
+    }
+
+    if (message.method === "turn/start") {
+      if (!resumedThreads.has(message.params.threadId)) {
+        fake.stdout.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: {
+              code: -32000,
+              message: `thread not found: ${message.params.threadId}`,
+            },
+          })}\n`,
+        );
+        return;
+      }
+
+      fake.stdout.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            turn: {
+              id: "turn-started",
+              status: "in_progress",
+              items: [],
+              input: [],
+            },
+          },
+        })}\n`,
+      );
+      fake.stdout.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          method: "turn/completed",
+          params: {
+            threadId: message.params.threadId,
+            turn: {
+              id: "turn-started",
+              status: "completed",
+              items: [],
+              input: [],
+            },
+          },
+        })}\n`,
+      );
+      return;
+    }
+
+    if (message.method === "turn/interrupt") {
+      if (!resumedThreads.has(message.params.threadId)) {
+        fake.stdout.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: {
+              code: -32000,
+              message: `thread not found: ${message.params.threadId}`,
+            },
+          })}\n`,
+        );
+        return;
+      }
+
+      fake.stdout.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            threadId: message.params.threadId,
+            turnId: message.params.turnId,
+            interrupted: true,
+          },
+        })}\n`,
+      );
+    }
+  });
+
+  fake.getSeenMethods = () => seenMethods;
+  return fake;
+}
+
 export function createAccessConfigFakeCodexProcess() {
   const fake = createBaseFakeProcess();
   let capturedResumeParams = null;

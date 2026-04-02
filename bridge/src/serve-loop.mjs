@@ -1,4 +1,4 @@
-import { readState, writeState } from "./binding-store.mjs";
+import { readState, writeState, writeTelegramRuntimeState } from "./binding-store.mjs";
 import { observeRelayCompletion } from "./relay-result.mjs";
 
 const MAX_UPDATE_FAILURE_RETRIES = 3;
@@ -38,7 +38,10 @@ export async function processTelegramUpdateBatch({
     if (!message) {
       const nextOffset = update.update_id + 1;
       state.telegramOffset = Math.max(state.telegramOffset, nextOffset);
-      await writeStateFn(statePath, state);
+      await writeTelegramRuntimeState(statePath, state, {
+        readStateFn: readState,
+        writeStateFn,
+      });
       continue;
     }
 
@@ -46,7 +49,10 @@ export async function processTelegramUpdateBatch({
     if (!isAllowedChat(config, chatId)) {
       const nextOffset = update.update_id + 1;
       state.telegramOffset = Math.max(state.telegramOffset, nextOffset);
-      await writeStateFn(statePath, state);
+      await writeTelegramRuntimeState(statePath, state, {
+        readStateFn: readState,
+        writeStateFn,
+      });
       continue;
     }
 
@@ -59,7 +65,10 @@ export async function processTelegramUpdateBatch({
       delete state.updateFailureCounts[String(update.update_id)];
       const nextOffset = update.update_id + 1;
       state.telegramOffset = Math.max(state.telegramOffset, nextOffset);
-      await writeStateFn(statePath, state);
+      await writeTelegramRuntimeState(statePath, state, {
+        readStateFn: readState,
+        writeStateFn,
+      });
     } catch (error) {
       onError(error);
       const failureKey = String(update.update_id);
@@ -84,11 +93,17 @@ export async function processTelegramUpdateBatch({
         }
         const nextOffset = update.update_id + 1;
         state.telegramOffset = Math.max(state.telegramOffset, nextOffset);
-        await writeStateFn(statePath, state);
+        await writeTelegramRuntimeState(statePath, state, {
+          readStateFn: readState,
+          writeStateFn,
+        });
         continue;
       }
 
-      await writeStateFn(statePath, state);
+      await writeTelegramRuntimeState(statePath, state, {
+        readStateFn: readState,
+        writeStateFn,
+      });
       break;
     }
   }
