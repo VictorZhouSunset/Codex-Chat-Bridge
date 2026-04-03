@@ -24,17 +24,43 @@ export function buildAttachReadyMessage({ threadId, threadLabel, cwd, accessSumm
     .join("\n");
 }
 
-export function buildBlockingTurnNotice(activeTurn) {
-  if (!activeTurn?.turnId) {
+export function buildBlockingTurnNotice(activity) {
+  const blockingTurn = normalizeTurn(activity?.blockingTurn);
+  const lingeringTurns = normalizeTurns(activity?.lingeringTurns);
+  const lines = [];
+
+  if (blockingTurn) {
+    const preview = summarizePreview(blockingTurn.textPreview);
+    if (preview) {
+      lines.push(`检测到当前 thread 最新 turn 仍未结束：${preview}。Telegram 会先等待；如需强制终止请发送 /interrupt。`);
+    } else {
+      lines.push("检测到当前 thread 最新 turn 仍未结束。Telegram 会先等待；如需强制终止请发送 /interrupt。");
+    }
+  }
+
+  if (lingeringTurns.length > 0) {
+    lines.push(
+      `警告: 当前线程中有 ${lingeringTurns.length} 个 lingering turns 标记为 "inProgress"，可能是 zombie turns。bridge 已忽略它们。`,
+    );
+  }
+
+  return lines.filter(Boolean).join("\n") || null;
+}
+
+function normalizeTurns(activeTurns) {
+  if (!activeTurns) {
+    return [];
+  }
+  return (Array.isArray(activeTurns) ? activeTurns : [activeTurns]).filter(
+    (turn) => turn?.turnId || turn?.id,
+  );
+}
+
+function normalizeTurn(turn) {
+  if (!turn) {
     return null;
   }
-
-  const preview = summarizePreview(activeTurn.textPreview);
-  if (preview) {
-    return `检测到当前 thread 上已有未结束 turn：${preview}。Telegram 会先等待；如需强制终止请发送 /interrupt。`;
-  }
-
-  return "检测到当前 thread 上已有未结束 turn。Telegram 会先等待；如需强制终止请发送 /interrupt。";
+  return turn?.turnId || turn?.id ? turn : null;
 }
 
 function summarizeProjectName(cwd) {
@@ -56,5 +82,5 @@ function summarizePreview(text) {
   if (!normalized) {
     return null;
   }
-  return normalized.length > 10 ? `${normalized.slice(0, 10)}...` : normalized;
+  return normalized.length > 10 ? `${normalized.slice(0, 10).trimEnd()} ...` : normalized;
 }

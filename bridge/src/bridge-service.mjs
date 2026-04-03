@@ -7,24 +7,31 @@ import {
   detachBinding,
   ensureStateFile,
   getBinding,
-  getLastRelayRecord,
   readState,
   replaceAllBindingsWith,
   updateLastRelayRecord,
-  updateBinding,
 } from "./binding-store.mjs";
+import { resolveEffectiveAccess } from "./access-profile.mjs";
 import {
-  applyPermissionLevel,
-  describeAccessSummary,
-  resolveEffectiveAccess,
-} from "./access-profile.mjs";
-import {
-  buildChangesMessage,
   buildHelpMessage,
-  buildLastErrorMessage,
-  buildStatusMessage,
   readWorkspaceChanges as defaultReadWorkspaceChanges,
 } from "./bridge-diagnostics.mjs";
+import {
+  AttachedSessionState,
+} from "./bridge-service/attached-session-state.mjs";
+import {
+  handleChangesCommand,
+  handleLastErrorCommand,
+  handlePermissionCommand,
+  handleStatusCommand,
+} from "./bridge-service/command-handlers.mjs";
+import {
+  buildDrainingMessage,
+  createTurnIdsKey,
+  dedupeTurns,
+  isThreadSessionLostError,
+  wait,
+} from "./bridge-service/runtime-helpers.mjs";
 import { classifyTelegramText } from "./commands.mjs";
 import { InteractivePromptManager } from "./interactive-prompt-manager.mjs";
 import { TelegramProgressTracker, createRelayJob } from "./telegram-progress.mjs";
@@ -38,9 +45,7 @@ export class BridgeService {
     this.processingChats = new Set();
     this.activeRelays = new Map();
     this.interruptingChats = new Set();
-    this.attachedSession = null;
     this.attachGeneration = 0;
-    this.turnEpochCounter = 0;
     this.nowFn = options.nowFn ?? Date.now;
     this.threadPollIntervalMs = options.threadPollIntervalMs ?? 1000;
     this.waitFn = options.waitFn ?? wait;
@@ -48,6 +53,10 @@ export class BridgeService {
     this.shutdownRequested = false;
     this.shutdownSource = null;
     this.shouldExit = false;
+    this.attachedSessionState = new AttachedSessionState({
+      clearAttachedThreadSession: () => this.codexClient?.clearAttachedThreadSession?.(),
+      nowFn: this.nowFn,
+    });
     this.readWorkspaceChanges = options.readWorkspaceChanges ?? defaultReadWorkspaceChanges;
     this.progressTracker = new TelegramProgressTracker({
       telegramApi: this.telegramApi,
@@ -61,6 +70,14 @@ export class BridgeService {
       telegramApi: this.telegramApi,
       codexClient: this.codexClient,
     });
+  }
+
+  get attachedSession() {
+    return this.attachedSessionState.current;
+  }
+
+  set attachedSession(session) {
+    this.attachedSessionState.replace(session);
   }
 
   async attach(binding) {
@@ -96,16 +113,16 @@ export class BridgeService {
     }
 
     try {
-      this.attachedSession = createAttachedSession({
+      this.attachedSessionState.startSession({
         binding,
         effectiveAccess,
         sessionStartedAt: this.nowFn(),
         generation: ++this.attachGeneration,
       });
-      const blockingTurn = await this.#inspectAttachedThreadTurn(binding, binding.chatId);
+      const threadActivity = await this.#inspectAttachedThreadActivity(binding, binding.chatId);
       const persistedBinding = await replaceAllBindingsWith(this.statePath, binding);
       this.#syncAttachedSessionMetadata(persistedBinding);
-      this.mode = blockingTurn ? "busy" : "idle";
+      this.mode = threadActivity.blockingTurn ? "busy" : "idle";
       this.shouldExit = false;
       this.shutdownRequested = false;
       this.shutdownSource = null;
@@ -132,8 +149,14 @@ export class BridgeService {
     };
   }
 
-  async getRuntimeStatus() {
+  async getRuntimeStatus(options = {}) {
     await ensureStateFile(this.statePath);
+    if (options.refreshAttachedTurns === true && this.attachedSession?.sessionReady) {
+      const binding = await getBinding(this.statePath, this.attachedSession.chatId);
+      if (binding) {
+        await this.#inspectAttachedThreadActivity(binding, binding.chatId);
+      }
+    }
     const state = await readState(this.statePath);
     return {
       mode: this.#deriveMode(state),
@@ -211,7 +234,9 @@ export class BridgeService {
     }
 
     if (classification.kind === "detach") {
+      const binding = await getBinding(this.statePath, message.chatId);
       await this.interactivePrompts.interruptAll(message.chatId);
+      await this.#interruptAttachedThreadTurnsBestEffort(binding, message.chatId);
       await this.detach(message.chatId);
       await this.#dropQueuedJobsForChat(
         message.chatId,
@@ -257,8 +282,8 @@ export class BridgeService {
       };
     }
 
-    const blockingTurn = await this.#inspectAttachedThreadTurn(binding, message.chatId);
-    const shouldQueue = this.processingChats.has(message.chatId) || Boolean(blockingTurn);
+    const threadActivity = await this.#inspectAttachedThreadActivity(binding, message.chatId);
+    const shouldQueue = this.processingChats.has(message.chatId) || Boolean(threadActivity.blockingTurn);
 
     const completion = new Promise((resolve, reject) => {
       const queue = this.pendingByChat.get(message.chatId) ?? [];
@@ -290,86 +315,31 @@ export class BridgeService {
   }
 
   async #handlePermissionCommand(chatId, permissionLevel) {
-    const binding = await getBinding(this.statePath, chatId);
-    if (!binding) {
-      await this.telegramApi.sendMessage(
-        chatId,
-        "No Codex thread is attached to this Telegram chat yet.",
-      );
-      return { kind: "missing-binding" };
-    }
-
-    if (!permissionLevel) {
-      await this.telegramApi.sendMessage(
-        chatId,
-        `当前权限: ${describeAccessSummary(binding.access)}`,
-        {
-          reply_markup: buildPermissionChooser(),
-        },
-      );
-      return { kind: "permission" };
-    }
-
-    const updatedBinding = await updateBinding(this.statePath, chatId, (existingBinding) => ({
-      ...existingBinding,
-      access: applyPermissionLevel({
-        level: permissionLevel,
-        accessState: existingBinding.access,
-        cwd: existingBinding.cwd,
-      }),
-    }));
-
-    await this.telegramApi.sendMessage(
+    return handlePermissionCommand(
+      {
+        statePath: this.statePath,
+        telegramApi: this.telegramApi,
+      },
       chatId,
-      `权限已切换到 ${permissionLevel}。\n当前权限: ${describeAccessSummary(updatedBinding.access)}`,
+      permissionLevel,
     );
-    return { kind: "permission" };
   }
 
   async #handleStatusCommand(chatId) {
-    const binding = await getBinding(this.statePath, chatId);
-    const runtimeStatus = await this.getRuntimeStatus();
-    const lastError = await getLastRelayRecord(this.statePath, chatId);
-    let activeRelay =
-      runtimeStatus.activeRelays?.find((relay) => relay.chatId === chatId) ??
-      this.#formatAttachedSessionTurn(runtimeStatus.attachedSession?.activeTurn) ??
-      null;
-    let observedExternalTurn = null;
-
-    if (!activeRelay && binding && this.codexClient?.inspectActiveTurn) {
-      const inProgressTurn = await this.codexClient.inspectActiveTurn(binding.threadId);
-      if (inProgressTurn) {
-        activeRelay = {
-          chatId,
-          threadId: binding.threadId,
-          turnId: inProgressTurn.id ?? null,
-          textPreview: inProgressTurn.textPreview ?? null,
-          inProgress: true,
-        };
-      }
-    }
-
-    if (!activeRelay && binding && runtimeStatus.mode === "degraded" && this.codexClient?.inspectActiveTurn) {
-      const inProgressTurn = await this.codexClient.inspectActiveTurn(binding.threadId);
-      if (inProgressTurn) {
-        observedExternalTurn = {
-          turnId: inProgressTurn.id ?? null,
-          threadId: binding.threadId,
-        };
-      }
-    }
-
-    await this.telegramApi.sendMessage(
+    return handleStatusCommand(
+      {
+        statePath: this.statePath,
+        telegramApi: this.telegramApi,
+        codexClient: this.codexClient,
+        getRuntimeStatus: (options) => this.getRuntimeStatus(options),
+        inspectAttachedThreadActivity: (binding, targetChatId) =>
+          this.#inspectAttachedThreadActivity(binding, targetChatId),
+        readThreadActivity: (threadId) => this.#readThreadActivity(threadId),
+        formatAttachedSessionTurn: (activeTurn) => this.#formatAttachedSessionTurn(activeTurn),
+        formatAttachedSessionTurns: (activeTurns) => this.#formatAttachedSessionTurns(activeTurns),
+      },
       chatId,
-      buildStatusMessage({
-        binding,
-        runtimeStatus,
-        lastError,
-        activeRelay,
-        observedExternalTurn,
-      }),
     );
-    return { kind: "status" };
   }
 
   async #handleInterruptCommand(chatId) {
@@ -405,30 +375,15 @@ export class BridgeService {
       return { kind: "interrupt" };
     }
 
-    let activeRelay =
-      this.activeRelays.get(chatId) ??
-      this.#formatAttachedSessionTurn(this.attachedSession?.activeTurn) ??
-      null;
+    const interruptTargets = await this.#collectInterruptTargets(binding, chatId);
+    const activeRelay = interruptTargets.at(-1) ?? null;
 
-    if (!activeRelay && this.codexClient?.inspectActiveTurn) {
-      const inProgressTurn = await this.codexClient.inspectActiveTurn(binding.threadId);
-      if (inProgressTurn) {
-        activeRelay = {
-          chatId,
-          threadId: binding.threadId,
-          turnId: inProgressTurn.id ?? null,
-          inProgress: true,
-        };
-        this.#setAttachedSessionObservedTurn(activeRelay);
-      }
-    }
-
-    if (!activeRelay) {
+    if (interruptTargets.length === 0 || !activeRelay) {
       await this.telegramApi.sendMessage(chatId, "当前没有可中断的运行中 turn。");
       return { kind: "interrupt" };
     }
 
-    if (!activeRelay.turnId) {
+    if (interruptTargets.some((turn) => !turn.turnId)) {
       await this.telegramApi.sendMessage(
         chatId,
         "当前 turn 尚未拿到可中断的 id，请稍后重试。",
@@ -450,8 +405,9 @@ export class BridgeService {
       chatId,
       threadId: activeRelay.threadId,
       turnEpoch: activeRelay.turnEpoch ?? this.attachedSession?.turnEpoch ?? null,
+      turnIdsKey: createTurnIdsKey(interruptTargets),
     };
-    void this.#performInterrupt(chatId, activeRelay, interruptSession)
+    void this.#performInterrupt(chatId, activeRelay.threadId, interruptTargets, interruptSession)
       .catch(() => {})
       .finally(() => {
         this.interruptingChats.delete(chatId);
@@ -467,39 +423,25 @@ export class BridgeService {
   }
 
   async #handleChangesCommand(chatId) {
-    const binding = await getBinding(this.statePath, chatId);
-    if (!binding) {
-      await this.telegramApi.sendMessage(
-        chatId,
-        "No Codex thread is attached to this Telegram chat yet.",
-      );
-      return { kind: "missing-binding" };
-    }
-
-    try {
-      const changes = await this.readWorkspaceChanges(binding.cwd ?? null);
-      await this.telegramApi.sendMessage(
-        chatId,
-        buildChangesMessage({ cwd: binding.cwd, changes }),
-      );
-      return { kind: "changes" };
-    } catch (error) {
-      await this.#recordLastError(chatId, {
-        scope: "changes",
-        message: error.message ?? String(error),
-      });
-      await this.telegramApi.sendMessage(
-        chatId,
-        `无法读取工作区变更: ${error.message ?? String(error)}`,
-      );
-      return { kind: "changes" };
-    }
+    return handleChangesCommand(
+      {
+        statePath: this.statePath,
+        telegramApi: this.telegramApi,
+        readWorkspaceChanges: (cwd) => this.readWorkspaceChanges(cwd),
+        recordLastError: (targetChatId, record) => this.#recordLastError(targetChatId, record),
+      },
+      chatId,
+    );
   }
 
   async #handleLastErrorCommand(chatId) {
-    const lastError = await getLastRelayRecord(this.statePath, chatId);
-    await this.telegramApi.sendMessage(chatId, buildLastErrorMessage(lastError));
-    return { kind: "last-error" };
+    return handleLastErrorCommand(
+      {
+        statePath: this.statePath,
+        telegramApi: this.telegramApi,
+      },
+      chatId,
+    );
   }
 
   #startWorker(chatId) {
@@ -689,7 +631,7 @@ export class BridgeService {
       this.mode = this.shutdownRequested ? "draining" : "busy";
       return;
     }
-    if (this.attachedSession?.activeTurn?.inProgress) {
+    if (this.attachedSession?.activeTurn) {
       this.mode = "busy";
       return;
     }
@@ -740,6 +682,10 @@ export class BridgeService {
   }
 
   async #forceStopBridge() {
+    const binding = this.attachedSession?.chatId
+      ? await getBinding(this.statePath, this.attachedSession.chatId)
+      : null;
+    await this.#interruptAttachedThreadTurnsBestEffort(binding, this.attachedSession?.chatId ?? null);
     await this.#dropQueuedJobs(buildDrainingMessage(this.shutdownSource));
     this.pendingByChat.clear();
     this.processingChats.clear();
@@ -779,119 +725,42 @@ export class BridgeService {
     if (!this.#hasReadySessionForBinding(binding)) {
       return;
     }
-
+    this.attachedSessionState.syncMetadata({
+      ...binding,
+      access: binding.access ?? this.attachedSession?.access,
+    });
     this.attachedSession = {
       ...this.attachedSession,
-      threadLabel: binding.threadLabel ?? this.attachedSession.threadLabel,
-      cwd: binding.cwd ?? this.attachedSession.cwd,
-      access: binding.access ?? this.attachedSession.access,
-      effectiveAccess: resolveEffectiveAccess(binding.access ?? this.attachedSession.access),
+      effectiveAccess: resolveEffectiveAccess(binding.access ?? this.attachedSession?.access),
     };
   }
 
   #matchesInterruptSession(interruptSession) {
-    return Boolean(
-      interruptSession &&
-        this.attachedSession &&
-        this.attachedSession.generation === interruptSession.generation &&
-        this.attachedSession.chatId === interruptSession.chatId &&
-        this.attachedSession.threadId === interruptSession.threadId &&
-        this.attachedSession.turnEpoch === interruptSession.turnEpoch,
-    );
+    return this.attachedSessionState.matchesInterruptSession(interruptSession);
   }
 
   #setAttachedSessionActiveTurn(activeTurn) {
-    if (!this.attachedSession?.sessionReady) {
-      return;
-    }
-    const turnEpoch = this.#resolveTurnEpoch(activeTurn);
-    this.attachedSession = {
-      ...this.attachedSession,
-      turnEpoch,
-      activeTurn: {
-        chatId: activeTurn.chatId,
-        threadId: activeTurn.threadId,
-        turnId: activeTurn.turnId ?? null,
-        startedAt: activeTurn.startedAt,
-        textPreview: activeTurn.textPreview ?? null,
-        source: "bridge",
-        turnEpoch,
-      },
-    };
+    this.attachedSessionState.setActiveTurn(activeTurn);
   }
 
   #clearAttachedSessionActiveTurn() {
-    if (!this.attachedSession) {
-      return;
-    }
-    this.attachedSession = {
-      ...this.attachedSession,
-      activeTurn: null,
-    };
+    this.attachedSessionState.clearActiveTurn();
   }
 
-  #setAttachedSessionObservedTurn(activeTurn) {
-    if (!this.attachedSession?.sessionReady) {
-      return;
-    }
-    const turnEpoch = this.#resolveTurnEpoch(activeTurn);
-    this.attachedSession = {
-      ...this.attachedSession,
-      turnEpoch,
-      activeTurn: {
-        chatId: activeTurn.chatId,
-        threadId: activeTurn.threadId,
-        turnId: activeTurn.turnId ?? null,
-        startedAt: activeTurn.startedAt ?? null,
-        textPreview: activeTurn.textPreview ?? null,
-        source: activeTurn.source ?? "attached-thread",
-        inProgress: activeTurn.inProgress ?? true,
-        turnEpoch,
-      },
-    };
+  #setAttachedSessionObservedTurns({ blockingTurn = null, lingeringTurns = [] }) {
+    this.attachedSessionState.setObservedTurns({ blockingTurn, lingeringTurns });
   }
 
-  #resolveTurnEpoch(activeTurn) {
-    const currentTurn = this.attachedSession?.activeTurn ?? null;
-    if (this.#isSameTurnContext(currentTurn, activeTurn)) {
-      return currentTurn?.turnEpoch ?? this.attachedSession?.turnEpoch ?? ++this.turnEpochCounter;
-    }
-    return ++this.turnEpochCounter;
-  }
-
-  #isSameTurnContext(currentTurn, nextTurn) {
-    if (!currentTurn || !nextTurn) {
-      return false;
-    }
-    if (
-      currentTurn.chatId !== nextTurn.chatId ||
-      currentTurn.threadId !== nextTurn.threadId ||
-      (currentTurn.source ?? "bridge") !== (nextTurn.source ?? "bridge")
-    ) {
-      return false;
-    }
-    if (currentTurn.turnId && nextTurn.turnId) {
-      return currentTurn.turnId === nextTurn.turnId;
-    }
-    return currentTurn.source === "bridge" && (currentTurn.turnId == null || nextTurn.turnId == null);
+  #clearAttachedSessionObservedTurns() {
+    this.attachedSessionState.clearObservedTurns();
   }
 
   #markAttachedSessionDegraded(reason) {
-    if (!this.attachedSession) {
-      return;
-    }
-    this.attachedSession = {
-      ...this.attachedSession,
-      sessionReady: false,
-      degradedReason: reason ?? "unknown",
-      activeTurn: null,
-    };
-    this.codexClient?.clearAttachedThreadSession?.();
+    this.attachedSessionState.markDegraded(reason);
   }
 
   #clearAttachedSession() {
-    this.attachedSession = null;
-    this.codexClient?.clearAttachedThreadSession?.();
+    this.attachedSessionState.clear();
   }
 
   #deriveMode(state) {
@@ -908,7 +777,7 @@ export class BridgeService {
     ) {
       return "degraded";
     }
-    if (this.attachedSession?.activeTurn?.inProgress) {
+    if (this.attachedSession?.activeTurn) {
       return "busy";
     }
     if (this.processingChats.size > 0) {
@@ -929,48 +798,167 @@ export class BridgeService {
 
   async #waitForAttachedThreadToBeIdle(binding, chatId) {
     while (true) {
-      const inProgressTurn = await this.#inspectAttachedThreadTurn(binding, chatId);
-      if (!inProgressTurn) {
+      const threadActivity = await this.#inspectAttachedThreadActivity(binding, chatId);
+      if (!threadActivity.blockingTurn) {
         return;
       }
       await this.waitFn(this.threadPollIntervalMs);
     }
   }
 
-  async #inspectAttachedThreadTurn(binding, chatId) {
-    if (!binding || !this.codexClient?.inspectActiveTurn) {
-      return null;
+  async #inspectAttachedThreadActivity(binding, chatId) {
+    if (!binding) {
+      return { blockingTurn: null, lingeringTurns: [] };
     }
 
-    const inProgressTurn = await this.codexClient.inspectActiveTurn(binding.threadId);
-    if (!inProgressTurn) {
-      const activeTurn = this.attachedSession?.activeTurn;
-      if (activeTurn?.source === "attached-thread") {
-        this.#clearAttachedSessionActiveTurn();
-      }
-      return null;
-    }
-
-    const observedTurn = {
+    const threadActivity = await this.#readThreadActivity(binding.threadId);
+    const blockingTurn = threadActivity.blockingTurn
+      ? {
+          chatId,
+          threadId: binding.threadId,
+          turnId: threadActivity.blockingTurn.id ?? null,
+          startedAt: null,
+          textPreview: threadActivity.blockingTurn.textPreview ?? null,
+          source: "attached-thread",
+          inProgress: true,
+        }
+      : null;
+    const lingeringTurns = (threadActivity.lingeringTurns ?? []).map((turn) => ({
       chatId,
       threadId: binding.threadId,
-      turnId: inProgressTurn.id ?? null,
+      turnId: turn.id ?? null,
       startedAt: null,
-      textPreview: inProgressTurn.textPreview ?? null,
+      textPreview: turn.textPreview ?? null,
       source: "attached-thread",
       inProgress: true,
+    }));
+
+    if (!blockingTurn && lingeringTurns.length === 0) {
+      this.#clearAttachedSessionObservedTurns();
+      return { blockingTurn: null, lingeringTurns: [] };
+    }
+
+    this.#setAttachedSessionObservedTurns({
+      blockingTurn,
+      lingeringTurns,
+    });
+    return {
+      blockingTurn: this.#formatAttachedSessionTurn(blockingTurn),
+      lingeringTurns: this.#formatAttachedSessionTurns(lingeringTurns),
     };
-    this.#setAttachedSessionObservedTurn(observedTurn);
-    return observedTurn;
   }
 
-  async #performInterrupt(chatId, activeRelay, interruptSession) {
+  async #readThreadActivity(threadId) {
+    if (!threadId) {
+      return { latestTurn: null, blockingTurn: null, lingeringTurns: [], inProgressTurns: [] };
+    }
+    if (this.codexClient?.inspectThreadActivity) {
+      return this.codexClient.inspectThreadActivity(threadId);
+    }
+    if (this.codexClient?.inspectActiveTurns) {
+      const inProgressTurns = await this.codexClient.inspectActiveTurns(threadId);
+      const blockingTurn = inProgressTurns.at(-1) ?? null;
+      return {
+        latestTurn: blockingTurn,
+        blockingTurn,
+        lingeringTurns: blockingTurn ? inProgressTurns.slice(0, -1) : [],
+        inProgressTurns,
+      };
+    }
+    if (this.codexClient?.inspectActiveTurn) {
+      const activeTurn = await this.codexClient.inspectActiveTurn(threadId);
+      return {
+        latestTurn: activeTurn,
+        blockingTurn: activeTurn,
+        lingeringTurns: [],
+        inProgressTurns: activeTurn ? [activeTurn] : [],
+      };
+    }
+    return { latestTurn: null, blockingTurn: null, lingeringTurns: [], inProgressTurns: [] };
+  }
+
+  async #collectInterruptTargets(binding, chatId) {
+    const interruptTargets = [];
+    const activeRelay = this.activeRelays.get(chatId);
+    if (activeRelay) {
+      interruptTargets.push(activeRelay);
+    }
+    const attachedTurns = this.#formatAttachedSessionTurns([
+      ...((this.attachedSession?.lingeringTurns ?? []).filter(Boolean)),
+      ...(this.attachedSession?.activeTurn ? [this.attachedSession.activeTurn] : []),
+    ]);
+    for (const turn of attachedTurns) {
+      interruptTargets.push(turn);
+    }
+    const inspectedActivity = await this.#inspectAttachedThreadActivity(binding, chatId);
+    const inspectedTurns = [
+      ...(inspectedActivity.lingeringTurns ?? []),
+      ...(inspectedActivity.blockingTurn ? [inspectedActivity.blockingTurn] : []),
+    ];
+    for (const turn of inspectedTurns) {
+      interruptTargets.push(turn);
+    }
+    return dedupeTurns(interruptTargets);
+  }
+
+  async #interruptAttachedThreadTurnsBestEffort(binding, chatId) {
+    if (!binding || !this.#hasReadySessionForBinding(binding) || !this.codexClient?.interruptAllTurns) {
+      return;
+    }
+    const activeTurns = await this.#collectInterruptTargets(binding, chatId);
+    if (activeTurns.length === 0) {
+      return;
+    }
     try {
-      await this.codexClient?.interruptTurn?.({
-        threadId: activeRelay.threadId,
-        turnId: activeRelay.turnId,
+      await this.codexClient.interruptAllTurns({
+        threadId: binding.threadId,
+        turns: activeTurns.map((turn) => ({
+          id: turn.turnId,
+          textPreview: turn.textPreview ?? null,
+        })),
+      });
+    } catch {
+    } finally {
+      this.#clearAttachedSessionObservedTurns();
+    }
+  }
+
+  async #performInterrupt(chatId, threadId, interruptTargets, interruptSession) {
+    try {
+      const interruptResult = await this.codexClient?.interruptAllTurns?.({
+        threadId,
+        turns: interruptTargets.map((turn) => ({
+          id: turn.turnId,
+          textPreview: turn.textPreview ?? null,
+        })),
       });
       if (!this.#matchesInterruptSession(interruptSession)) {
+        return;
+      }
+      if ((interruptResult?.failures?.length ?? 0) > 0) {
+        const failureMessage =
+          interruptResult.failures[0]?.error?.message ??
+          "Interrupt request failed for one or more running turns.";
+        await this.#recordLastError(chatId, {
+          scope: "interrupt",
+          message: failureMessage,
+        });
+        await this.telegramApi.sendMessage(chatId, `中断失败: ${failureMessage}`);
+        return;
+      }
+      const targetTurnIds = new Set(interruptTargets.map((turn) => turn.turnId).filter(Boolean));
+      const remainingTurns = (await this.#readThreadActivity(threadId)).inProgressTurns.filter((turn) =>
+        targetTurnIds.size === 0 ? true : targetTurnIds.has(turn.id ?? turn.turnId),
+      );
+      if (remainingTurns.length > 0) {
+        await this.#recordLastError(chatId, {
+          scope: "interrupt",
+          message: `${remainingTurns.length} lingering turns remained after interrupt.`,
+        });
+        await this.telegramApi.sendMessage(
+          chatId,
+          `中断失败: 仍有 ${remainingTurns.length} 个运行中的 turn 未结束。`,
+        );
         return;
       }
       await this.#dropQueuedJobsForChat(
@@ -1009,91 +997,10 @@ export class BridgeService {
   }
 
   #formatAttachedSessionTurn(activeTurn) {
-    if (!activeTurn) {
-      return null;
-    }
-    return {
-      chatId: activeTurn.chatId,
-      threadId: activeTurn.threadId,
-      turnId: activeTurn.turnId ?? null,
-      startedAt: activeTurn.startedAt ?? null,
-      textPreview: activeTurn.textPreview ?? null,
-      source: activeTurn.source ?? "bridge",
-      inProgress: activeTurn.inProgress ?? false,
-      turnEpoch: activeTurn.turnEpoch ?? null,
-      runningForMs:
-        typeof activeTurn.startedAt === "number" ? this.nowFn() - activeTurn.startedAt : undefined,
-    };
+    return this.attachedSessionState.formatTurn(activeTurn);
   }
-}
 
-function createAttachedSession({ binding, effectiveAccess, sessionStartedAt, generation }) {
-  return {
-    chatId: binding.chatId,
-    threadId: binding.threadId,
-    threadLabel: binding.threadLabel ?? null,
-    cwd: binding.cwd ?? null,
-    access: binding.access ?? null,
-    effectiveAccess,
-    sessionReady: true,
-    sessionStartedAt,
-    generation,
-    turnEpoch: 0,
-    degradedReason: null,
-    activeTurn: null,
-  };
-}
-
-const DRAINING_MESSAGE = "Bridge shutdown in progress. Please return to Codex and re-attach later.";
-
-function buildDrainingMessage(source) {
-  const sourceLabel = formatShutdownSource(source);
-  if (!sourceLabel) {
-    return DRAINING_MESSAGE;
+  #formatAttachedSessionTurns(activeTurns) {
+    return this.attachedSessionState.formatTurns(activeTurns);
   }
-  return `${DRAINING_MESSAGE} (requested from ${sourceLabel})`;
-}
-
-function isThreadSessionLostError(error) {
-  if (error?.code === "THREAD_SESSION_NOT_READY") {
-    return true;
-  }
-  return /thread not found|attached thread session is not ready/i.test(error?.message ?? "");
-}
-
-function formatShutdownSource(source) {
-  switch (`${source ?? ""}`.trim().toLowerCase()) {
-    case "tray":
-      return "tray";
-    case "cli":
-      return "cli";
-    case "no_bindings":
-      return "binding cleanup";
-    case "unknown":
-    case "":
-      return null;
-    default:
-      return source;
-  }
-}
-
-function wait(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-function buildPermissionChooser() {
-  return {
-    inline_keyboard: [
-      [
-        { text: "default", callback_data: "permission:default" },
-        { text: "readonly", callback_data: "permission:readonly" },
-      ],
-      [
-        { text: "workspace", callback_data: "permission:workspace" },
-        { text: "full", callback_data: "permission:full" },
-      ],
-    ],
-  };
 }

@@ -12,6 +12,7 @@ When a source module is split, its tests should usually split with it instead of
 | `bridge-service-progress.test.mjs` | bridge progress suite | Covers typing-first behavior and throttled Telegram progress updates. |
 | `bridge-service-interactive.test.mjs` | bridge interactive suite | Covers approval routing, user input prompts, and interactive detach behavior. |
 | `bridge-service-lifecycle.test.mjs` | bridge lifecycle suite | Covers draining, force shutdown, singleton attach-session replacement, zombie-turn attach visibility, auto-exit, worker failure settlement, and slash interrupt behavior. |
+| `attached-session-state.test.mjs` | extracted runtime helper suite | Verifies the attached-session support module keeps turn epochs, lingering-turn ordering, and interrupt-session matching stable. |
 | `codex-app-server-core.test.mjs` | protocol core suite | Verifies client initialization, thread reads, attached-session setup, active-turn preview extraction, interrupt timeout handling, and session-aware relay/interrupt behavior. |
 | `codex-app-server-progress.test.mjs` | protocol progress suite | Verifies JSON-RPC progress aggregation into Telegram-facing summaries. |
 | `codex-app-server-interactive.test.mjs` | protocol interactive suite | Verifies approval and request_user_input server-request handling. |
@@ -31,4 +32,4 @@ When a source module is split, its tests should usually split with it instead of
 | `attach-notification.test.mjs` | attach announcement suite | Verifies ready-message formatting, running-turn warnings, and resend decisions. |
 | `tray-companion.test.mjs` | tray launcher suite | Verifies Node-side tray process spawning and reuse. |
 | `relay-result.test.mjs` | helper suite | Verifies detached relay completion observation. |
-| `helpers/` | fixture support directory | Holds shared fake Telegram APIs and fake app-server processes for concern-based suites. |
+| `helpers/` | fixture support directory | Holds split fixture modules and barrels for bridge-runtime and app-server test doubles. |

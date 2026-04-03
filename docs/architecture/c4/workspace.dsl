@@ -19,6 +19,7 @@ workspace "codex-chat-bridge" "Codex thread handoff bridge for external chat cha
         tray_companion -> bridge_daemon "Reads runtime status and requests shutdown"
 
         component bridge_runtime "Bridge runtime" "bridge/src/bridge-service.mjs" "Coordinates bindings, relay workers, shutdown mode, and access updates."
+        component bridge_runtime_support "Bridge runtime support modules" "bridge/src/bridge-service/" "Holds attached-session state, command handlers, and shared bridge-runtime helpers."
         component cli_entrypoint "CLI entrypoint" "bridge/src/cli.mjs" "Starts/stops the daemon and runs attach/detach/status commands."
         component codex_client "Codex client adapter" "bridge/src/codex-app-server.mjs" "Implements the app-server JSON-RPC bridge."
         component telegram_transport "Telegram transport" "bridge/src/telegram-api.mjs" "Wraps Bot API calls."
@@ -26,6 +27,7 @@ workspace "codex-chat-bridge" "Codex thread handoff bridge for external chat cha
         component control_plane "Control server" "bridge/src/control-server.mjs" "Exposes health, status, and shutdown endpoints."
 
         bridge_daemon -> bridge_runtime "Runs"
+        bridge_runtime -> bridge_runtime_support "Delegates internal state/command helpers to"
         bridge_daemon -> cli_entrypoint "Starts from"
         bridge_runtime -> codex_client "Uses"
         bridge_runtime -> telegram_transport "Uses"
@@ -46,6 +48,7 @@ workspace "codex-chat-bridge" "Codex thread handoff bridge for external chat cha
 
         component bridge_daemon "bridge_runtime_components" {
             include bridge_runtime
+            include bridge_runtime_support
             include cli_entrypoint
             include codex_client
             include telegram_transport

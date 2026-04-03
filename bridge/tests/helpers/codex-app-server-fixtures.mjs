@@ -418,6 +418,86 @@ export function createInterruptHangingFakeCodexProcess() {
   return fake;
 }
 
+export function createMultipleActiveTurnsFakeCodexProcess() {
+  const fake = createBaseFakeProcess();
+  const interruptedTurnIds = [];
+  const rl = readline.createInterface({ input: fake.stdin });
+  rl.on("line", (line) => {
+    const message = JSON.parse(line);
+
+    if (message.method === "initialize") {
+      handleInitialize(fake, message);
+      return;
+    }
+
+    if (message.method === "thread/resume") {
+      fake.stdout.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { thread: createFakeThread(message.params.threadId) },
+        })}\n`,
+      );
+      return;
+    }
+
+    if (message.method === "thread/read") {
+      fake.stdout.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            thread: {
+              ...createFakeThread(message.params.threadId),
+              turns: [
+                {
+                  id: "turn-old",
+                  status: "inProgress",
+                  items: [
+                    {
+                      id: "item-user-old",
+                      type: "userMessage",
+                      text: "Unable to activate workspace 还是这么显示",
+                    },
+                  ],
+                  input: [],
+                },
+                {
+                  id: "turn-new",
+                  status: "inProgress",
+                  items: [
+                    {
+                      id: "item-user-new",
+                      type: "userMessage",
+                      text: "Connect me to tg please",
+                    },
+                  ],
+                  input: [],
+                },
+              ].filter((turn) => !interruptedTurnIds.includes(turn.id)),
+            },
+          },
+        })}\n`,
+      );
+      return;
+    }
+
+    if (message.method === "turn/interrupt") {
+      interruptedTurnIds.push(message.params.turnId);
+      fake.stdout.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { interrupted: true },
+        })}\n`,
+      );
+    }
+  });
+
+  fake.getInterruptedTurnIds = () => [...interruptedTurnIds];
+  return fake;
+}
+
 export function createAccessConfigFakeCodexProcess() {
   const fake = createBaseFakeProcess();
   let capturedResumeParams = null;

@@ -1,13 +1,14 @@
 # bridge/src
-Node runtime for the Codex chat bridge, centered around a small CLI, a relay orchestration service, and adapter modules.
+Node runtime for the Codex chat bridge, centered around a small CLI, a relay orchestration facade, and adapter modules.
 `cli.mjs` is the only human-facing entrypoint; everything else should stay composable and testable behind it.
-The largest coordination module is `bridge-service.mjs`, while formatters, stores, transport adapters, and status helpers stay split out by responsibility.
+`bridge-service.mjs` now delegates attached-session state, command handling, and runtime utility details into the internal `bridge-service/` support folder.
 一旦我所属的文件夹有所变化，请更新我。
 
 | file name | position | function |
 | --- | --- | --- |
 | `cli.mjs` | process entrypoint | Parses commands, starts/stops the bridge daemon, attaches/detaches thread bindings, and forwards explicit Codex session access into attach. |
-| `bridge-service.mjs` | runtime orchestrator | Owns the single attached thread session, per-chat relay queues, attached-thread busy/interrupt semantics, zombie-turn visibility, forced tray shutdown, degraded/idle/busy/draining mode transitions, and access updates. |
+| `bridge-service.mjs` | runtime orchestrator facade | Owns the public bridge runtime API while delegating attached-session state, command handling, and shared utility logic into support modules. |
+| `bridge-service/` | runtime support directory | Holds the extracted attached-session, command-handler, and runtime-helper modules used internally by `bridge-service.mjs`. |
 | `codex-app-server.mjs` | Codex transport adapter | Wraps the Codex app-server JSON-RPC protocol used for one attached thread session, active-turn inspection with user-message preview extraction, interruption, and turn relay. |
 | `codex-app-server-protocol.mjs` | protocol helper | Normalizes app-server interactive requests and sandbox-mode translations. |
 | `cli-support.mjs` | CLI helper | Holds reusable argument parsing, explicit attach-access parsing, allowlist, port, and usage helpers for the CLI. |

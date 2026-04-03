@@ -1,10 +1,18 @@
-// input: bridge runtime test cases that need fake Telegram APIs, fake Codex clients, and temp state files
-// output: reusable deterministic fixtures for queueing, progress, shutdown, interrupt, and interactive bridge tests
-// pos: shared test helper module for concern-based bridge-service suites
+// input: bridge runtime test suites that need shared fake Codex clients plus aggregated Telegram/state fixture exports
+// output: codex-heavy bridge-service fixtures and stable re-exports for concern-focused helper modules
+// pos: barrel-style bridge-service test helper surface that keeps existing suite imports stable
 // 一旦我被更新，务必更新我的开头注释以及所属文件夹的md。
-import os from "node:os";
-import path from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+export {
+  createManualClock,
+  createTestStatePath,
+  waitForNextTask,
+} from "./bridge-service/state-fixtures.mjs";
+export {
+  createBlockingFirstSendTelegramApi,
+  createBlockingNthSendTelegramApi,
+  createFakeTelegramApi,
+  createFailingShutdownTelegramApi,
+} from "./bridge-service/telegram-fixtures.mjs";
 
 export function createFakeCodexClient() {
   return {
@@ -36,6 +44,24 @@ export function createFakeCodexClient() {
       }
       return null;
     },
+    async inspectActiveTurns(threadId) {
+      const activeTurn = await this.inspectActiveTurn(threadId);
+      return activeTurn ? [activeTurn] : [];
+    },
+    async interruptTurn() {
+      this.threadStatus = "idle";
+      return { interrupted: true };
+    },
+    async interruptAllTurns({ threadId, turns = null }) {
+      const activeTurns = Array.isArray(turns) ? turns : await this.inspectActiveTurns(threadId);
+      this.threadStatus = "idle";
+      return {
+        threadId,
+        totalTurns: activeTurns.length,
+        interruptedTurnIds: activeTurns.map((turn) => turn.id),
+        failures: [],
+      };
+    },
     async relayText(payload) {
       this.relayCalls.push({
         threadId: payload.threadId,
@@ -50,62 +76,6 @@ export function createFakeCodexClient() {
       };
     },
   };
-}
-
-export function createManualClock(startMs = 0) {
-  let nowMs = startMs;
-  let nextTimerId = 1;
-  const timers = new Map();
-
-  return {
-    now() {
-      return nowMs;
-    },
-    setTimeoutFn(callback, delayMs) {
-      const timerId = nextTimerId++;
-      timers.set(timerId, {
-        callback,
-        runAt: nowMs + Math.max(0, delayMs),
-      });
-      return timerId;
-    },
-    clearTimeoutFn(timerId) {
-      timers.delete(timerId);
-    },
-    async advance(ms) {
-      nowMs += ms;
-      while (true) {
-        const dueTimers = [...timers.entries()]
-          .filter(([, timer]) => timer.runAt <= nowMs)
-          .sort((left, right) => left[1].runAt - right[1].runAt);
-
-        if (dueTimers.length === 0) {
-          break;
-        }
-
-        for (const [timerId, timer] of dueTimers) {
-          timers.delete(timerId);
-          timer.callback();
-        }
-
-        await Promise.resolve();
-      }
-    },
-  };
-}
-
-export async function waitForNextTask() {
-  await new Promise((resolve) => {
-    setTimeout(resolve, 0);
-  });
-}
-
-export async function createTestStatePath(t) {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tg-bridge-service-"));
-  t.after(async () => {
-    await rm(tempDir, { recursive: true, force: true });
-  });
-  return path.join(tempDir, "state.json");
 }
 
 export function createImmediateCodexClient() {
@@ -175,6 +145,24 @@ export function createQueuedCodexClient() {
       }
       return null;
     },
+    async inspectActiveTurns(threadId) {
+      const activeTurn = await this.inspectActiveTurn(threadId);
+      return activeTurn ? [activeTurn] : [];
+    },
+    async interruptTurn() {
+      this.threadStatus = "idle";
+      return { interrupted: true };
+    },
+    async interruptAllTurns({ threadId, turns = null }) {
+      const activeTurns = Array.isArray(turns) ? turns : await this.inspectActiveTurns(threadId);
+      this.threadStatus = "idle";
+      return {
+        threadId,
+        totalTurns: activeTurns.length,
+        interruptedTurnIds: activeTurns.map((turn) => turn.id),
+        failures: [],
+      };
+    },
     async relayText(payload) {
       this.relayCalls.push({
         threadId: payload.threadId,
@@ -243,6 +231,10 @@ export function createInterruptibleQueuedCodexClient() {
       }
       return null;
     },
+    async inspectActiveTurns(threadId) {
+      const activeTurn = await this.inspectActiveTurn(threadId);
+      return activeTurn ? [activeTurn] : [];
+    },
     async interruptTurn(payload) {
       this.interrupts.push(payload);
       interrupted = true;
@@ -251,6 +243,26 @@ export function createInterruptibleQueuedCodexClient() {
       pendingThreadId = null;
       pendingReject?.(error);
       return { interrupted: true };
+    },
+    async interruptAllTurns({ threadId, turns = null }) {
+      const activeTurns = Array.isArray(turns) ? turns : await this.inspectActiveTurns(threadId);
+      const results = await Promise.allSettled(
+        activeTurns.map((turn) => this.interruptTurn({ threadId, turnId: turn.id })),
+      );
+      return {
+        threadId,
+        totalTurns: activeTurns.length,
+        interruptedTurnIds: results
+          .map((result, index) => (result.status === "fulfilled" ? activeTurns[index].id : null))
+          .filter(Boolean),
+        failures: results
+          .map((result, index) =>
+            result.status === "rejected"
+              ? { turnId: activeTurns[index].id, error: result.reason }
+              : null,
+          )
+          .filter(Boolean),
+      };
     },
     async relayText(payload) {
       this.relayCalls.push({
@@ -304,7 +316,10 @@ export function createFailingAttachCodexClient(message = "attach session failed"
 }
 
 export function createSessionAwareCodexClient(options = {}) {
-  let externalActiveTurn = options.externalActiveTurn ?? null;
+  let threadTurns = normalizeThreadTurns(options.threadTurns ?? []);
+  let externalActiveTurns = normalizeExternalTurns(
+    options.externalActiveTurns ?? options.externalActiveTurn ?? null,
+  );
   let attachedThreadId = options.attachedThreadId ?? null;
   let attached = attachedThreadId ? {
     threadId: attachedThreadId,
@@ -341,6 +356,81 @@ export function createSessionAwareCodexClient(options = {}) {
         text: `echo:${payload.text}`,
       };
     },
+    async readThread(threadId, options = {}) {
+      if (!options.includeTurns) {
+        return {
+          id: threadId,
+          status: "idle",
+          turns: [],
+        };
+      }
+      return {
+        id: threadId,
+        status: "idle",
+        turns: threadTurns
+          .filter((turn) => turn.threadId === threadId)
+          .map((turn) => ({
+            id: turn.turnId,
+            status: turn.status,
+            items: turn.textPreview
+              ? [
+                  {
+                    type: "userMessage",
+                    content: [{ type: "text", text: turn.textPreview, text_elements: [] }],
+                  },
+                ]
+              : [],
+          })),
+      };
+    },
+    async inspectThreadActivity(threadId) {
+      const turns = [
+        ...threadTurns.filter((turn) => turn.threadId === threadId),
+        ...externalActiveTurns
+          .filter((turn) => turn.threadId === threadId)
+          .map((turn) => ({
+            threadId: turn.threadId,
+            turnId: turn.turnId,
+            status: "inProgress",
+            textPreview: turn.textPreview ?? null,
+          })),
+      ];
+      const latestTurn = turns.at(-1) ?? null;
+      const inProgressTurns = turns.filter((turn) => turn.status === "inProgress");
+      const blockingTurn =
+        latestTurn?.status === "inProgress"
+          ? {
+              id: latestTurn.turnId,
+              status: latestTurn.status,
+              threadId,
+              textPreview: latestTurn.textPreview ?? null,
+            }
+          : null;
+      const lingeringTurns = inProgressTurns
+        .filter((turn) => turn.turnId !== blockingTurn?.id)
+        .map((turn) => ({
+          id: turn.turnId,
+          status: turn.status,
+          threadId,
+          textPreview: turn.textPreview ?? null,
+        }));
+      return {
+        latestTurn: latestTurn
+          ? {
+              id: latestTurn.turnId,
+              status: latestTurn.status,
+              threadId,
+              textPreview: latestTurn.textPreview ?? null,
+            }
+          : null,
+        blockingTurn,
+        lingeringTurns,
+        inProgressTurns: [
+          ...(blockingTurn ? [blockingTurn] : []),
+          ...lingeringTurns,
+        ],
+      };
+    },
     async interruptTurn(payload) {
       this.interrupts.push(payload);
       if (!attached || attached.threadId !== payload.threadId) {
@@ -348,21 +438,39 @@ export function createSessionAwareCodexClient(options = {}) {
         error.code = "THREAD_SESSION_NOT_READY";
         throw error;
       }
-      if (externalActiveTurn && payload.threadId === externalActiveTurn.threadId) {
-        externalActiveTurn = null;
-      }
+      externalActiveTurns = externalActiveTurns.filter((turn) => turn.turnId !== payload.turnId);
       return { interrupted: true };
     },
+    async interruptAllTurns({ threadId, turns = null }) {
+      const activeTurns = Array.isArray(turns) ? turns : await this.inspectActiveTurns(threadId);
+      const interruptedTurnIds = activeTurns.map((turn) => turn.id ?? turn.turnId).filter(Boolean);
+      this.interrupts.push(
+        ...interruptedTurnIds.map((turnId) => ({
+          threadId,
+          turnId,
+        })),
+      );
+      externalActiveTurns = externalActiveTurns.filter((turn) => turn.threadId !== threadId);
+      return {
+        threadId,
+        totalTurns: activeTurns.length,
+        interruptedTurnIds,
+        failures: [],
+      };
+    },
     async inspectActiveTurn(threadId) {
-      if (externalActiveTurn && threadId === externalActiveTurn.threadId) {
-        return {
-          id: externalActiveTurn.turnId,
+      const turns = await this.inspectActiveTurns(threadId);
+      return turns.at(-1) ?? null;
+    },
+    async inspectActiveTurns(threadId) {
+      return externalActiveTurns
+        .filter((turn) => threadId === turn.threadId)
+        .map((turn) => ({
+          id: turn.turnId,
           status: "inProgress",
           threadId,
-          textPreview: externalActiveTurn.textPreview ?? null,
-        };
-      }
-      return null;
+          textPreview: turn.textPreview ?? null,
+        }));
     },
     getAttachedThreadSession() {
       return attached;
@@ -372,20 +480,23 @@ export function createSessionAwareCodexClient(options = {}) {
       attachedThreadId = null;
     },
     clearExternalActiveTurn() {
-      externalActiveTurn = null;
+      externalActiveTurns = [];
     },
     setExternalActiveTurn(turn) {
-      externalActiveTurn = turn;
+      externalActiveTurns = normalizeExternalTurns(turn);
+    },
+    setExternalActiveTurns(turns) {
+      externalActiveTurns = normalizeExternalTurns(turns);
     },
   };
 }
 
 export function createRejectingInterruptCodexClient(message = "interrupt failed") {
-  let externalActiveTurn = {
+  let externalActiveTurns = normalizeExternalTurns({
     threadId: "thread-123",
     turnId: "turn-external",
     textPreview: "old turn",
-  };
+  });
   let attached = null;
 
   return {
@@ -399,24 +510,44 @@ export function createRejectingInterruptCodexClient(message = "interrupt failed"
         cwd: payload.cwd ?? null,
       };
       this.attachedSessions.push(payload);
-      externalActiveTurn.threadId = payload.threadId;
+      externalActiveTurns = externalActiveTurns.map((turn) => ({
+        ...turn,
+        threadId: payload.threadId,
+      }));
       return attached;
     },
     async inspectActiveTurn(threadId) {
-      if (externalActiveTurn && externalActiveTurn.threadId === threadId) {
-        return {
-          id: externalActiveTurn.turnId,
+      const turns = await this.inspectActiveTurns(threadId);
+      return turns.at(-1) ?? null;
+    },
+    async inspectActiveTurns(threadId) {
+      return externalActiveTurns
+        .filter((turn) => turn.threadId === threadId)
+        .map((turn) => ({
+          id: turn.turnId,
           status: "inProgress",
           threadId,
-          textPreview: externalActiveTurn.textPreview,
-        };
-      }
-      return null;
+          textPreview: turn.textPreview,
+        }));
     },
     async interruptTurn(payload) {
       this.interrupts.push(payload);
       await Promise.resolve();
       throw new Error(message);
+    },
+    async interruptAllTurns({ threadId, turns = null }) {
+      const activeTurns = Array.isArray(turns) ? turns : await this.inspectActiveTurns(threadId);
+      this.interrupts.push(
+        ...activeTurns.map((turn) => ({
+          threadId,
+          turnId: turn.id,
+        })),
+      );
+      const failures = activeTurns.map((turn) => ({
+        turnId: turn.id,
+        error: new Error(message),
+      }));
+      throw failures[0].error;
     },
     getAttachedThreadSession() {
       return attached;
@@ -428,11 +559,11 @@ export function createRejectingInterruptCodexClient(message = "interrupt failed"
 }
 
 export function createDeferredInterruptCodexClient() {
-  let externalActiveTurn = {
+  let externalActiveTurns = normalizeExternalTurns({
     threadId: "thread-123",
     turnId: "turn-external",
     textPreview: "old turn",
-  };
+  });
   let attached = null;
   let interruptResolve;
   let interruptReject;
@@ -453,25 +584,51 @@ export function createDeferredInterruptCodexClient() {
         cwd: payload.cwd ?? null,
       };
       this.attachedSessions.push(payload);
-      externalActiveTurn.threadId = payload.threadId;
+      externalActiveTurns = externalActiveTurns.map((turn) => ({
+        ...turn,
+        threadId: payload.threadId,
+      }));
       return attached;
     },
     async inspectActiveTurn(threadId) {
-      if (externalActiveTurn && externalActiveTurn.threadId === threadId) {
-        return {
-          id: externalActiveTurn.turnId,
+      const turns = await this.inspectActiveTurns(threadId);
+      return turns.at(-1) ?? null;
+    },
+    async inspectActiveTurns(threadId) {
+      return externalActiveTurns
+        .filter((turn) => turn.threadId === threadId)
+        .map((turn) => ({
+          id: turn.turnId,
           status: "inProgress",
           threadId,
-          textPreview: externalActiveTurn.textPreview,
-        };
-      }
-      return null;
+          textPreview: turn.textPreview,
+        }));
     },
     async interruptTurn(payload) {
       this.interrupts.push(payload);
       await interruptPromise;
-      externalActiveTurn = null;
+      externalActiveTurns = externalActiveTurns.filter((turn) => turn.turnId !== payload.turnId);
       return { interrupted: true };
+    },
+    async interruptAllTurns({ threadId, turns = null }) {
+      const activeTurns = Array.isArray(turns) ? turns : await this.inspectActiveTurns(threadId);
+      const results = await Promise.allSettled(
+        activeTurns.map((turn) => this.interruptTurn({ threadId, turnId: turn.id })),
+      );
+      return {
+        threadId,
+        totalTurns: activeTurns.length,
+        interruptedTurnIds: results
+          .map((result, index) => (result.status === "fulfilled" ? activeTurns[index].id : null))
+          .filter(Boolean),
+        failures: results
+          .map((result, index) =>
+            result.status === "rejected"
+              ? { turnId: activeTurns[index].id, error: result.reason }
+              : null,
+          )
+          .filter(Boolean),
+      };
     },
     async relayText(payload) {
       this.relayCalls.push({
@@ -501,12 +658,183 @@ export function createDeferredInterruptCodexClient() {
       attached = null;
     },
     clearExternalActiveTurn() {
-      externalActiveTurn = null;
+      externalActiveTurns = [];
     },
     setExternalActiveTurn(turn) {
-      externalActiveTurn = turn;
+      externalActiveTurns = normalizeExternalTurns(turn);
+    },
+    setExternalActiveTurns(turns) {
+      externalActiveTurns = normalizeExternalTurns(turns);
     },
   };
+}
+
+export function createFailureReportingInterruptCodexClient(message = "Interrupt request timed out while waiting for Codex app-server.") {
+  let externalActiveTurns = normalizeExternalTurns([
+    {
+      threadId: "thread-123",
+      turnId: "turn-old",
+      textPreview: "Unable to activate workspace 还是这么显示",
+    },
+    {
+      threadId: "thread-123",
+      turnId: "turn-new",
+      textPreview: "Connect me to tg please",
+    },
+  ]);
+  let attached = null;
+
+  return {
+    attachedSessions: [],
+    interrupts: [],
+    async attachThreadSession(payload) {
+      attached = {
+        threadId: payload.threadId,
+        approvalPolicy: payload.approvalPolicy,
+        sandboxPolicy: payload.sandboxPolicy,
+        cwd: payload.cwd ?? null,
+      };
+      this.attachedSessions.push(payload);
+      externalActiveTurns = externalActiveTurns.map((turn) => ({
+        ...turn,
+        threadId: payload.threadId,
+      }));
+      return attached;
+    },
+    async inspectActiveTurn(threadId) {
+      const turns = await this.inspectActiveTurns(threadId);
+      return turns.at(-1) ?? null;
+    },
+    async inspectActiveTurns(threadId) {
+      return externalActiveTurns
+        .filter((turn) => turn.threadId === threadId)
+        .map((turn) => ({
+          id: turn.turnId,
+          status: "inProgress",
+          threadId,
+          textPreview: turn.textPreview,
+        }));
+    },
+    async interruptAllTurns({ threadId, turns = null }) {
+      const activeTurns = Array.isArray(turns) ? turns : await this.inspectActiveTurns(threadId);
+      const failures = activeTurns.map((turn) => {
+        const turnId = turn.id ?? turn.turnId;
+        this.interrupts.push({ threadId, turnId });
+        return {
+          turnId,
+          error: new Error(message),
+        };
+      });
+      return {
+        threadId,
+        totalTurns: activeTurns.length,
+        interruptedTurnIds: [],
+        failures,
+      };
+    },
+    getAttachedThreadSession() {
+      return attached;
+    },
+    clearAttachedThreadSession() {
+      attached = null;
+    },
+  };
+}
+
+export function createNonClearingInterruptCodexClient() {
+  let externalActiveTurns = normalizeExternalTurns([
+    {
+      threadId: "thread-123",
+      turnId: "turn-old",
+      textPreview: "Unable to activate workspace 还是这么显示",
+    },
+    {
+      threadId: "thread-123",
+      turnId: "turn-new",
+      textPreview: "Connect me to tg please",
+    },
+  ]);
+  let attached = null;
+
+  return {
+    attachedSessions: [],
+    interrupts: [],
+    async attachThreadSession(payload) {
+      attached = {
+        threadId: payload.threadId,
+        approvalPolicy: payload.approvalPolicy,
+        sandboxPolicy: payload.sandboxPolicy,
+        cwd: payload.cwd ?? null,
+      };
+      this.attachedSessions.push(payload);
+      externalActiveTurns = externalActiveTurns.map((turn) => ({
+        ...turn,
+        threadId: payload.threadId,
+      }));
+      return attached;
+    },
+    async inspectActiveTurn(threadId) {
+      const turns = await this.inspectActiveTurns(threadId);
+      return turns.at(-1) ?? null;
+    },
+    async inspectActiveTurns(threadId) {
+      return externalActiveTurns
+        .filter((turn) => turn.threadId === threadId)
+        .map((turn) => ({
+          id: turn.turnId,
+          status: "inProgress",
+          threadId,
+          textPreview: turn.textPreview,
+        }));
+    },
+    async interruptAllTurns({ threadId, turns = null }) {
+      const activeTurns = Array.isArray(turns) ? turns : await this.inspectActiveTurns(threadId);
+      const interruptedTurnIds = activeTurns.map((turn) => turn.id ?? turn.turnId).filter(Boolean);
+      this.interrupts.push(
+        ...interruptedTurnIds.map((turnId) => ({
+          threadId,
+          turnId,
+        })),
+      );
+      return {
+        threadId,
+        totalTurns: activeTurns.length,
+        interruptedTurnIds,
+        failures: [],
+      };
+    },
+    getAttachedThreadSession() {
+      return attached;
+    },
+    clearAttachedThreadSession() {
+      attached = null;
+    },
+  };
+}
+
+function normalizeExternalTurns(turns) {
+  if (!turns) {
+    return [];
+  }
+  const values = Array.isArray(turns) ? turns : [turns];
+  return values.filter(Boolean).map((turn) => ({
+    threadId: turn.threadId,
+    turnId: turn.turnId ?? turn.id,
+    textPreview: turn.textPreview ?? null,
+  }));
+}
+
+function normalizeThreadTurns(turns) {
+  if (!turns) {
+    return [];
+  }
+  const values = Array.isArray(turns) ? turns : [turns];
+  return values.filter(Boolean).map((turn) => ({
+    threadId: turn.threadId,
+    turnId: turn.turnId ?? turn.id,
+    status: turn.status ?? "completed",
+    textPreview: turn.textPreview ?? null,
+  }));
 }
 
 export function createHangingRelayCodexClient() {
@@ -577,134 +905,6 @@ export function createInspectFailingAttachCodexClient(message = "inspect failed"
     },
     clearAttachedThreadSession() {
       attached = null;
-    },
-  };
-}
-
-export function createFakeTelegramApi() {
-  let nextMessageId = 1;
-  return {
-    sent: [],
-    actions: [],
-    edited: [],
-    answeredCallbacks: [],
-    async sendMessage(chatId, text, options = {}) {
-      const message = { chatId, text, ...options, message_id: nextMessageId++ };
-      this.sent.push(message);
-      return message;
-    },
-    async sendChatAction(chatId, action) {
-      this.actions.push({ chatId, action });
-    },
-    async editMessageText(chatId, messageId, text) {
-      this.edited.push({ chatId, messageId, text });
-      return { chatId, messageId, text };
-    },
-    async answerCallbackQuery(callbackQueryId, options = {}) {
-      this.answeredCallbacks.push({ callbackQueryId, ...options });
-    },
-  };
-}
-
-export function createBlockingFirstSendTelegramApi() {
-  let nextMessageId = 1;
-  let resolveFirstSend;
-  let firstSendStartedResolve;
-  const firstSendStarted = new Promise((resolve) => {
-    firstSendStartedResolve = resolve;
-  });
-  let firstSendBlocked = true;
-
-  return {
-    sent: [],
-    actions: [],
-    edited: [],
-    firstSendStarted,
-    releaseFirstSend() {
-      if (!firstSendBlocked) {
-        return;
-      }
-      firstSendBlocked = false;
-      resolveFirstSend?.();
-    },
-    async sendMessage(chatId, text) {
-      const message = { chatId, text, message_id: nextMessageId++ };
-      this.sent.push(message);
-
-      if (firstSendBlocked) {
-        firstSendStartedResolve?.();
-        await new Promise((resolve) => {
-          resolveFirstSend = resolve;
-        });
-      }
-
-      return message;
-    },
-    async sendChatAction(chatId, action) {
-      this.actions.push({ chatId, action });
-    },
-    async editMessageText(chatId, messageId, text) {
-      this.edited.push({ chatId, messageId, text });
-      return { chatId, messageId, text };
-    },
-  };
-}
-
-export function createBlockingNthSendTelegramApi(blockedSendNumber) {
-  let nextMessageId = 1;
-  let sendCount = 0;
-  let resolveBlockedSend;
-  let blockedSendStartedResolve;
-  const blockedSendStarted = new Promise((resolve) => {
-    blockedSendStartedResolve = resolve;
-  });
-  let blocked = true;
-
-  return {
-    sent: [],
-    actions: [],
-    edited: [],
-    blockedSendStarted,
-    releaseBlockedSend() {
-      if (!blocked) {
-        return;
-      }
-      blocked = false;
-      resolveBlockedSend?.();
-    },
-    async sendMessage(chatId, text) {
-      sendCount += 1;
-      const message = { chatId, text, message_id: nextMessageId++ };
-      this.sent.push(message);
-
-      if (blocked && sendCount === blockedSendNumber) {
-        blockedSendStartedResolve?.();
-        await new Promise((resolve) => {
-          resolveBlockedSend = resolve;
-        });
-      }
-
-      return message;
-    },
-    async sendChatAction(chatId, action) {
-      this.actions.push({ chatId, action });
-    },
-    async editMessageText(chatId, messageId, text) {
-      this.edited.push({ chatId, messageId, text });
-      return { chatId, messageId, text };
-    },
-  };
-}
-
-export function createFailingShutdownTelegramApi() {
-  const base = createFakeTelegramApi();
-  return {
-    ...base,
-    async sendMessage(chatId, text) {
-      if (/shutdown/i.test(text)) {
-        throw new Error("telegram send failed");
-      }
-      return base.sendMessage.call(this, chatId, text);
     },
   };
 }

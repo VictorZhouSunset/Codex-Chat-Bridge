@@ -186,6 +186,102 @@ test("slash status includes the current running message preview for an attached-
   assert.match(telegramApi.sent.at(-1)?.text ?? "", /当前运行消息: Unable to \.\.\./);
 });
 
+test("slash status lists all lingering turn previews for the attached thread", async (t) => {
+  const statePath = await createTestStatePath(t);
+  const telegramApi = createFakeTelegramApi();
+  const codexClient = createSessionAwareCodexClient({
+    threadTurns: [
+      {
+        threadId: "thread-123",
+        turnId: "turn-old",
+        status: "inProgress",
+        textPreview: "Unable to activate workspace 还是这么显示",
+      },
+      {
+        threadId: "thread-123",
+        turnId: "turn-latest-running",
+        status: "inProgress",
+        textPreview: "Connect me to tg please",
+      },
+      {
+        threadId: "thread-123",
+        turnId: "turn-latest-completed",
+        status: "completed",
+        textPreview: "latest completed turn",
+      },
+    ],
+  });
+  const service = new BridgeService({
+    statePath,
+    codexClient,
+    telegramApi,
+  });
+
+  await service.attach({
+    chatId: "1001",
+    threadId: "thread-123",
+    threadLabel: "Project A",
+    cwd: "D:\\project-a",
+  });
+
+  await service.handleTelegramMessage({
+    chatId: "1001",
+    text: "/status",
+  });
+
+  assert.match(telegramApi.sent.at(-1)?.text ?? "", /Bridge 状态: idle/);
+  assert.doesNotMatch(telegramApi.sent.at(-1)?.text ?? "", /当前运行消息:/);
+  assert.match(
+    telegramApi.sent.at(-1)?.text ?? "",
+    /警告: 当前线程中有 2 个 lingering turns 标记为 "inProgress"，可能是 zombie turns。bridge 已忽略它们。/,
+  );
+});
+
+test("slash status shows only the most recent in-progress turn and a lingering warning count", async (t) => {
+  const statePath = await createTestStatePath(t);
+  const telegramApi = createFakeTelegramApi();
+  const codexClient = createSessionAwareCodexClient({
+    threadTurns: [
+      {
+        threadId: "thread-123",
+        turnId: "turn-old",
+        status: "inProgress",
+        textPreview: "Unable to activate workspace 还是这么显示",
+      },
+      {
+        threadId: "thread-123",
+        turnId: "turn-latest-running",
+        status: "inProgress",
+        textPreview: "Connect me to tg please",
+      },
+    ],
+  });
+  const service = new BridgeService({
+    statePath,
+    codexClient,
+    telegramApi,
+  });
+
+  await service.attach({
+    chatId: "1001",
+    threadId: "thread-123",
+    threadLabel: "Project A",
+    cwd: "D:\\project-a",
+  });
+
+  await service.handleTelegramMessage({
+    chatId: "1001",
+    text: "/status",
+  });
+
+  assert.match(telegramApi.sent.at(-1)?.text ?? "", /当前运行消息: Connect me \.\.\./);
+  assert.doesNotMatch(telegramApi.sent.at(-1)?.text ?? "", /当前运行消息 2:/);
+  assert.match(
+    telegramApi.sent.at(-1)?.text ?? "",
+    /警告: 当前线程中有 1 个 lingering turns 标记为 "inProgress"，可能是 zombie turns。bridge 已忽略它们。/,
+  );
+});
+
 test("slash changes reports concise git-style workspace changes", async (t) => {
   const statePath = await createTestStatePath(t);
   const telegramApi = createFakeTelegramApi();

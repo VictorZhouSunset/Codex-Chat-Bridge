@@ -146,7 +146,10 @@ async function attachCommand(args) {
     let runtimeNotice = null;
     try {
       const liveStatus = await fetchBridgeStatus({ controlPort });
-      runtimeNotice = buildBlockingTurnNotice(liveStatus?.attachedSession?.activeTurn ?? null);
+      runtimeNotice = buildBlockingTurnNotice({
+        blockingTurn: liveStatus?.attachedSession?.activeTurn ?? null,
+        lingeringTurns: liveStatus?.attachedSession?.lingeringTurns ?? [],
+      });
     } catch {}
 
     const telegramApi = new TelegramApi({ token: config.telegramBotToken });

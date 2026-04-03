@@ -7,3 +7,4 @@ Do not rewrite history here; supersede older ADRs instead.
 | file name | position | function |
 | --- | --- | --- |
 | `ADR-0001-20260331-bridge-runtime-boundaries.md` | accepted ADR | Records the decision to split the bridge runtime around explicit runtime submodules and document-first boundaries. |
+| `ADR-0002-20260402-bridge-runtime-support-modules.md` | accepted ADR | Records the internal support-module split for bridge-session state and bridge-service test fixtures while keeping runtime behavior stable. |

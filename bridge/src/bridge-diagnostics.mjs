@@ -31,6 +31,7 @@ export function buildStatusMessage({
   runtimeStatus,
   lastError,
   activeRelay = null,
+  lingeringTurns = [],
   observedExternalTurn = null,
 }) {
   if (!binding) {
@@ -39,7 +40,9 @@ export function buildStatusMessage({
       `运行模式: ${runtimeStatus.mode ?? "offline"}`,
       `排队消息: ${runtimeStatus.queueDepth ?? 0}`,
       `待处理交互: ${runtimeStatus.pendingInteractiveCount ?? 0}`,
+      formatActiveRelayMessageLine(activeRelay),
       formatActiveRelayLine(activeRelay),
+      formatLingeringTurnsWarning(lingeringTurns),
       lastError ? `最近错误: ${lastError.message}` : "最近错误: 无",
     ]
       .filter(Boolean)
@@ -60,6 +63,7 @@ export function buildStatusMessage({
     `待处理交互: ${runtimeStatus.pendingInteractiveCount ?? 0}`,
     formatActiveRelayMessageLine(activeRelay),
     formatActiveRelayLine(activeRelay),
+    formatLingeringTurnsWarning(lingeringTurns),
     formatObservedExternalTurnLine(observedExternalTurn),
     lastError ? `最近错误: ${lastError.message}` : "最近错误: 无",
   ]
@@ -128,12 +132,19 @@ function formatActiveRelayLine(activeRelay) {
 }
 
 function formatActiveRelayMessageLine(activeRelay) {
-  const textPreview = `${activeRelay?.textPreview ?? ""}`.trim();
-  if (!textPreview) {
+  const preview = `${activeRelay?.textPreview ?? ""}`.trim();
+  if (!preview) {
     return null;
   }
+  return `当前运行消息: ${summarizePreview(preview)}`;
+}
 
-  return `当前运行消息: ${summarizePreview(textPreview)}`;
+function formatLingeringTurnsWarning(lingeringTurns) {
+  const count = Array.isArray(lingeringTurns) ? lingeringTurns.length : 0;
+  if (count <= 0) {
+    return null;
+  }
+  return `警告: 当前线程中有 ${count} 个 lingering turns 标记为 "inProgress"，可能是 zombie turns。bridge 已忽略它们。`;
 }
 
 function formatObservedExternalTurnLine(observedExternalTurn) {
@@ -170,5 +181,5 @@ function formatDurationMs(durationMs) {
 }
 
 function summarizePreview(text) {
-  return text.length > 10 ? `${text.slice(0, 10)}...` : text;
+  return text.length > 10 ? `${text.slice(0, 10).trimEnd()} ...` : text;
 }

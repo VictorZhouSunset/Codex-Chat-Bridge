@@ -63,18 +63,38 @@ export class CodexAppServerClient {
   }
 
   async inspectActiveTurn(threadId) {
+    const activity = await this.inspectThreadActivity(threadId);
+    return activity.blockingTurn ?? null;
+  }
+
+  async inspectActiveTurns(threadId) {
     const thread = await this.readThread(threadId, { includeTurns: true });
     const turns = Array.isArray(thread?.turns) ? thread.turns : [];
-    for (let index = turns.length - 1; index >= 0; index -= 1) {
-      const turn = turns[index];
-      if (turn?.status === "inProgress") {
-        return {
-          ...turn,
-          textPreview: extractTurnTextPreview(turn),
-        };
-      }
-    }
-    return null;
+    return turns
+      .filter((turn) => turn?.status === "inProgress")
+      .map((turn) => ({
+        ...turn,
+        textPreview: extractTurnTextPreview(turn),
+      }));
+  }
+
+  async inspectThreadActivity(threadId) {
+    const thread = await this.readThread(threadId, { includeTurns: true });
+    const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+    const mappedTurns = turns.map((turn) => ({
+      ...turn,
+      textPreview: extractTurnTextPreview(turn),
+    }));
+    const latestTurn = mappedTurns.at(-1) ?? null;
+    const inProgressTurns = mappedTurns.filter((turn) => turn?.status === "inProgress");
+    const blockingTurn = latestTurn?.status === "inProgress" ? latestTurn : null;
+    const lingeringTurns = inProgressTurns.filter((turn) => turn?.id !== blockingTurn?.id);
+    return {
+      latestTurn,
+      blockingTurn,
+      lingeringTurns,
+      inProgressTurns,
+    };
   }
 
   async getActiveTurn(threadId) {
@@ -190,6 +210,37 @@ export class CodexAppServerClient {
       }
       throw error;
     }
+  }
+
+  async interruptAllTurns({ threadId, turns = null }) {
+    this.#assertAttachedThreadSession(threadId);
+    const activeTurns = Array.isArray(turns) ? turns : await this.inspectActiveTurns(threadId);
+    const uniqueTurnIds = [...new Set(activeTurns.map((turn) => turn?.id).filter(Boolean))];
+    const results = await Promise.allSettled(
+      uniqueTurnIds.map((turnId) => this.interruptTurn({ threadId, turnId })),
+    );
+
+    const interruptedTurnIds = [];
+    const failures = [];
+    for (let index = 0; index < uniqueTurnIds.length; index += 1) {
+      const turnId = uniqueTurnIds[index];
+      const result = results[index];
+      if (result.status === "fulfilled") {
+        interruptedTurnIds.push(turnId);
+      } else {
+        failures.push({
+          turnId,
+          error: result.reason,
+        });
+      }
+    }
+
+    return {
+      threadId,
+      totalTurns: uniqueTurnIds.length,
+      interruptedTurnIds,
+      failures,
+    };
   }
 
   async close() {

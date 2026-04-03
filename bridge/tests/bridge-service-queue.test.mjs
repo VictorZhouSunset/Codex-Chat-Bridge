@@ -102,6 +102,55 @@ test("queues behind an attached-thread turn that is already running before the l
   ]);
 });
 
+test("does not queue when only older lingering in-progress turns exist and the latest turn is completed", async (t) => {
+  const statePath = await createTestStatePath(t);
+  const codexClient = createSessionAwareCodexClient({
+    threadTurns: [
+      {
+        threadId: "thread-123",
+        turnId: "turn-zombie-old",
+        status: "inProgress",
+        textPreview: "old zombie turn",
+      },
+      {
+        threadId: "thread-123",
+        turnId: "turn-latest-completed",
+        status: "completed",
+        textPreview: "latest completed turn",
+      },
+    ],
+  });
+  const telegramApi = createFakeTelegramApi();
+  const service = new BridgeService({
+    statePath,
+    codexClient,
+    telegramApi,
+  });
+
+  await service.attach({
+    chatId: "1001",
+    threadId: "thread-123",
+    threadLabel: "Project A",
+    cwd: "D:\\project-a",
+  });
+
+  const relay = await service.handleTelegramMessage({
+    chatId: "1001",
+    text: "another message",
+  });
+
+  await relay.completion;
+
+  assert.deepEqual(
+    codexClient.relayCalls.map(({ threadId, text }) => ({ threadId, text })),
+    [{ threadId: "thread-123", text: "another message" }],
+  );
+  assert.equal(
+    telegramApi.sent.some(({ text }) => text === "（codex还在运行上一个turn，结束后消息会送达codex）"),
+    false,
+  );
+});
+
 test("queues a second telegram message behind an active relay", async (t) => {
   const statePath = await createTestStatePath(t);
   const codexClient = createQueuedCodexClient();

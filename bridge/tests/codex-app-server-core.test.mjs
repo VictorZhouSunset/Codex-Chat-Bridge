@@ -9,6 +9,7 @@ import { CodexAppServerClient } from "../src/codex-app-server.mjs";
 import {
   createFakeCodexProcess,
   createInterruptHangingFakeCodexProcess,
+  createMultipleActiveTurnsFakeCodexProcess,
   createResumeRequiredFakeCodexProcess,
   createResumeRequiredInterruptFakeCodexProcess,
 } from "./helpers/codex-app-server-fixtures.mjs";
@@ -165,6 +166,62 @@ test("inspectActiveTurn extracts a concise preview of the running user message",
 
   assert.equal(activeTurn.id, "turn-stuck");
   assert.match(activeTurn.textPreview ?? "", /Unable to activate workspace/);
+
+  await client.close();
+});
+
+test("inspectActiveTurns returns every in-progress turn with a preview", async () => {
+  const client = new CodexAppServerClient({
+    processFactory: () => createMultipleActiveTurnsFakeCodexProcess(),
+  });
+
+  await client.start();
+  await client.attachThreadSession({
+    threadId: "thread-xyz",
+    approvalPolicy: "never",
+    sandboxPolicy: { type: "dangerFullAccess" },
+  });
+
+  const activeTurns = await client.inspectActiveTurns("thread-xyz");
+
+  assert.deepEqual(
+    activeTurns.map((turn) => ({ id: turn.id, textPreview: turn.textPreview })),
+    [
+      {
+        id: "turn-old",
+        textPreview: "Unable to activate workspace 还是这么显示",
+      },
+      {
+        id: "turn-new",
+        textPreview: "Connect me to tg please",
+      },
+    ],
+  );
+
+  await client.close();
+});
+
+test("interruptAllTurns interrupts every in-progress turn on the thread", async () => {
+  let fakeProcess;
+  const client = new CodexAppServerClient({
+    processFactory: () => {
+      fakeProcess = createMultipleActiveTurnsFakeCodexProcess();
+      return fakeProcess;
+    },
+  });
+
+  await client.start();
+  await client.attachThreadSession({
+    threadId: "thread-xyz",
+    approvalPolicy: "never",
+    sandboxPolicy: { type: "dangerFullAccess" },
+  });
+
+  const result = await client.interruptAllTurns({ threadId: "thread-xyz" });
+
+  assert.deepEqual(result.interruptedTurnIds, ["turn-old", "turn-new"]);
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(fakeProcess.getInterruptedTurnIds(), ["turn-old", "turn-new"]);
 
   await client.close();
 });

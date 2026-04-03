@@ -74,13 +74,42 @@ test("adds a fallback notice to the attach-ready message when desktop access cou
   assert.match(message, /读取桌面端权限失败，采用默认权限 readonly/);
 });
 
-test("builds a warning notice when the attached thread already has a running turn", () => {
+test("builds a warning notice when the attached thread already has running turns", () => {
   const notice = buildBlockingTurnNotice({
-    turnId: "turn-stuck",
-    textPreview: "Unable to activate workspace 还是这么显示",
+    blockingTurn: {
+      turnId: "turn-connect",
+      textPreview: "Connect me to tg please",
+    },
+    lingeringTurns: [
+      {
+        turnId: "turn-stuck",
+        textPreview: "Unable to activate workspace 还是这么显示",
+      },
+    ],
   });
 
-  assert.match(notice ?? "", /已有未结束 turn/);
-  assert.match(notice ?? "", /Unable to \.\.\./);
+  assert.match(notice ?? "", /最新 turn 仍未结束/);
+  assert.match(notice ?? "", /Connect me \.\.\./);
+  assert.match(notice ?? "", /有 1 个 lingering turns/);
   assert.match(notice ?? "", /\/interrupt/);
+});
+
+test("builds a warning notice for ignored lingering turns even when the latest turn is not running", () => {
+  const notice = buildBlockingTurnNotice({
+    blockingTurn: null,
+    lingeringTurns: [
+      {
+        turnId: "turn-stuck",
+        textPreview: "Unable to activate workspace 还是这么显示",
+      },
+      {
+        turnId: "turn-older",
+        textPreview: "好的开始",
+      },
+    ],
+  });
+
+  assert.doesNotMatch(notice ?? "", /已有未结束 turn/);
+  assert.match(notice ?? "", /有 2 个 lingering turns/);
+  assert.match(notice ?? "", /已忽略它们/);
 });

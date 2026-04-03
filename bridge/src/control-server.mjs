@@ -109,7 +109,7 @@ export function createControlServer({ bridgeService, readStateFn = readState }) 
 }
 
 async function buildStatusBody({ bridgeService, readStateFn }) {
-  const runtime = await bridgeService.getRuntimeStatus();
+  const runtime = await bridgeService.getRuntimeStatus({ refreshAttachedTurns: true });
   const bindings = await getBindingMetadata({
     statePath: bridgeService.statePath,
     readStateFn,
