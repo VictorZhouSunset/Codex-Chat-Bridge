@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   buildAttachReadyMessage,
+  buildBlockingTurnNotice,
   shouldSendAttachReadyMessage,
 } from "../src/attach-notification.mjs";
 
@@ -71,4 +72,15 @@ test("adds a fallback notice to the attach-ready message when desktop access cou
 
   assert.match(message, /权限: readonly/);
   assert.match(message, /读取桌面端权限失败，采用默认权限 readonly/);
+});
+
+test("builds a warning notice when the attached thread already has a running turn", () => {
+  const notice = buildBlockingTurnNotice({
+    turnId: "turn-stuck",
+    textPreview: "Unable to activate workspace 还是这么显示",
+  });
+
+  assert.match(notice ?? "", /已有未结束 turn/);
+  assert.match(notice ?? "", /Unable to \.\.\./);
+  assert.match(notice ?? "", /\/interrupt/);
 });

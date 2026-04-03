@@ -120,7 +120,7 @@ fn run() -> Result<(), AppError> {
             Event::UserEvent(AppCommand::ShutdownRequested) => {
                 let shutdown_response = match client
                     .post(format!("{bridge_base_url}/shutdown"))
-                    .json(&serde_json::json!({ "source": "tray" }))
+                    .json(&serde_json::json!({ "source": "tray", "force": true }))
                     .send()
                     .and_then(|response| response.error_for_status())
                     .and_then(|response| response.json::<ShutdownResponse>())

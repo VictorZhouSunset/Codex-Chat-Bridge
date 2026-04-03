@@ -27,7 +27,9 @@ export async function resolveControlResponse({
 
   if (method === "POST" && pathName === "/shutdown") {
     const shutdownBody = normalizeJsonBody(body);
-    await bridgeService.requestShutdown(shutdownBody.source);
+    await bridgeService.requestShutdown(shutdownBody.source, {
+      force: shutdownBody.force === true,
+    });
     const statusBody = await buildStatusBody({ bridgeService, readStateFn });
     return {
       statusCode: 200,

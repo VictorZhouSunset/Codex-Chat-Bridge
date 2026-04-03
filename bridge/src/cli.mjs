@@ -9,7 +9,11 @@ import { readFile, writeFile } from "node:fs/promises";
 
 import { describeAccessSummary } from "./access-profile.mjs";
 import { ensureStateFile, getBinding, readState, writeState } from "./binding-store.mjs";
-import { buildAttachReadyMessage, shouldSendAttachReadyMessage } from "./attach-notification.mjs";
+import {
+  buildAttachReadyMessage,
+  buildBlockingTurnNotice,
+  shouldSendAttachReadyMessage,
+} from "./attach-notification.mjs";
 import { BridgeService } from "./bridge-service.mjs";
 import { createControlServer, shouldKeepServing } from "./control-server.mjs";
 import { CodexAppServerClient } from "./codex-app-server.mjs";
@@ -139,6 +143,12 @@ async function attachCommand(args) {
       wasHealthy,
     })
   ) {
+    let runtimeNotice = null;
+    try {
+      const liveStatus = await fetchBridgeStatus({ controlPort });
+      runtimeNotice = buildBlockingTurnNotice(liveStatus?.attachedSession?.activeTurn ?? null);
+    } catch {}
+
     const telegramApi = new TelegramApi({ token: config.telegramBotToken });
     await telegramApi.sendMessage(
       binding.chatId,
@@ -147,7 +157,7 @@ async function attachCommand(args) {
         threadLabel: binding.threadLabel,
         cwd: binding.cwd,
         accessSummary: describeAccessSummary(binding.access),
-        notice: accessContext.notice,
+        notice: [accessContext.notice, runtimeNotice].filter(Boolean).join("\n"),
       }),
     );
   }

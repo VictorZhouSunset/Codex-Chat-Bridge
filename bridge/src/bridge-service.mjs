@@ -37,7 +37,10 @@ export class BridgeService {
     this.pendingByChat = new Map();
     this.processingChats = new Set();
     this.activeRelays = new Map();
+    this.interruptingChats = new Set();
     this.attachedSession = null;
+    this.attachGeneration = 0;
+    this.turnEpochCounter = 0;
     this.nowFn = options.nowFn ?? Date.now;
     this.threadPollIntervalMs = options.threadPollIntervalMs ?? 1000;
     this.waitFn = options.waitFn ?? wait;
@@ -93,13 +96,16 @@ export class BridgeService {
     }
 
     try {
-      const persistedBinding = await replaceAllBindingsWith(this.statePath, binding);
       this.attachedSession = createAttachedSession({
-        binding: persistedBinding,
+        binding,
         effectiveAccess,
         sessionStartedAt: this.nowFn(),
+        generation: ++this.attachGeneration,
       });
-      this.mode = "idle";
+      const blockingTurn = await this.#inspectAttachedThreadTurn(binding, binding.chatId);
+      const persistedBinding = await replaceAllBindingsWith(this.statePath, binding);
+      this.#syncAttachedSessionMetadata(persistedBinding);
+      this.mode = blockingTurn ? "busy" : "idle";
       this.shouldExit = false;
       this.shutdownRequested = false;
       this.shutdownSource = null;
@@ -145,10 +151,15 @@ export class BridgeService {
     };
   }
 
-  async requestShutdown(source = "unknown") {
+  async requestShutdown(source = "unknown", options = {}) {
     await ensureStateFile(this.statePath);
     this.shutdownRequested = true;
     this.shutdownSource = source;
+
+    if (options.force) {
+      await this.#forceStopBridge();
+      return this.getRuntimeStatus();
+    }
 
     if (this.processingChats.size === 0) {
       await this.#transitionToReadyToStop();
@@ -332,6 +343,7 @@ export class BridgeService {
           chatId,
           threadId: binding.threadId,
           turnId: inProgressTurn.id ?? null,
+          textPreview: inProgressTurn.textPreview ?? null,
           inProgress: true,
         };
       }
@@ -424,31 +436,33 @@ export class BridgeService {
       return { kind: "interrupt" };
     }
 
-    try {
-      await this.codexClient?.interruptTurn?.({
-        threadId: activeRelay.threadId,
-        turnId: activeRelay.turnId,
-      });
-    } catch (error) {
-      if (isThreadSessionLostError(error)) {
-        this.#markAttachedSessionDegraded("thread_session_not_ready");
-        await this.telegramApi.sendMessage(
-          chatId,
-          "Bridge 会话未就绪，无法中断当前 turn。请回到 Codex 重新 attach。",
-        );
-        return { kind: "interrupt" };
-      }
-      throw error;
+    if (this.interruptingChats.has(chatId)) {
+      await this.telegramApi.sendMessage(
+        chatId,
+        "中断请求仍在处理中，请稍后再试 /status、/detach 或重新发送 /interrupt。",
+      );
+      return { kind: "interrupt" };
     }
-    await this.#dropQueuedJobsForChat(
+
+    this.interruptingChats.add(chatId);
+    const interruptSession = {
+      generation: this.attachedSession?.generation ?? null,
       chatId,
-      "当前运行已中断，排队消息已清空，请重新发送你想继续的内容。",
+      threadId: activeRelay.threadId,
+      turnEpoch: activeRelay.turnEpoch ?? this.attachedSession?.turnEpoch ?? null,
+    };
+    void this.#performInterrupt(chatId, activeRelay, interruptSession)
+      .catch(() => {})
+      .finally(() => {
+        this.interruptingChats.delete(chatId);
+      });
+    await this.telegramApi.sendMessage(
+      chatId,
+      "正在尝试中断当前运行中的 turn，请稍候。",
     );
-    this.pendingByChat.delete(chatId);
-    await this.telegramApi.sendMessage(chatId, "已中断当前运行中的 turn，请重新发送消息。");
     return {
       kind: "interrupt",
-      completion: Promise.resolve({ interrupted: true }),
+      completion: Promise.resolve({ interruptRequested: true }),
     };
   }
 
@@ -588,6 +602,11 @@ export class BridgeService {
           job.resolve({
             interrupted: true,
           });
+        } else if (this.#isIntentionalForceShutdownError(error)) {
+          job.resolve({
+            dropped: true,
+            shutdown: true,
+          });
         } else if (isThreadSessionLostError(error)) {
           this.#markAttachedSessionDegraded("thread_session_not_ready");
           await this.#recordLastError(chatId, {
@@ -670,6 +689,10 @@ export class BridgeService {
       this.mode = this.shutdownRequested ? "draining" : "busy";
       return;
     }
+    if (this.attachedSession?.activeTurn?.inProgress) {
+      this.mode = "busy";
+      return;
+    }
 
     if (this.shutdownRequested) {
       await this.#transitionToReadyToStop();
@@ -716,6 +739,19 @@ export class BridgeService {
     await clearAllBindings(this.statePath);
   }
 
+  async #forceStopBridge() {
+    await this.#dropQueuedJobs(buildDrainingMessage(this.shutdownSource));
+    this.pendingByChat.clear();
+    this.processingChats.clear();
+    this.activeRelays.clear();
+    this.interruptingChats.clear();
+    this.mode = "ready_to_stop";
+    this.shouldExit = true;
+    this.#clearAttachedSession();
+    await clearAllBindings(this.statePath);
+    await this.codexClient?.close?.();
+  }
+
   async #finalizeShutdownBeforeSettling(chatId) {
     const queueDepthForChat = (this.pendingByChat.get(chatId) ?? []).length;
     if (!this.shutdownRequested || queueDepthForChat > 0 || this.processingChats.size !== 1) {
@@ -753,12 +789,25 @@ export class BridgeService {
     };
   }
 
+  #matchesInterruptSession(interruptSession) {
+    return Boolean(
+      interruptSession &&
+        this.attachedSession &&
+        this.attachedSession.generation === interruptSession.generation &&
+        this.attachedSession.chatId === interruptSession.chatId &&
+        this.attachedSession.threadId === interruptSession.threadId &&
+        this.attachedSession.turnEpoch === interruptSession.turnEpoch,
+    );
+  }
+
   #setAttachedSessionActiveTurn(activeTurn) {
     if (!this.attachedSession?.sessionReady) {
       return;
     }
+    const turnEpoch = this.#resolveTurnEpoch(activeTurn);
     this.attachedSession = {
       ...this.attachedSession,
+      turnEpoch,
       activeTurn: {
         chatId: activeTurn.chatId,
         threadId: activeTurn.threadId,
@@ -766,6 +815,7 @@ export class BridgeService {
         startedAt: activeTurn.startedAt,
         textPreview: activeTurn.textPreview ?? null,
         source: "bridge",
+        turnEpoch,
       },
     };
   }
@@ -784,8 +834,10 @@ export class BridgeService {
     if (!this.attachedSession?.sessionReady) {
       return;
     }
+    const turnEpoch = this.#resolveTurnEpoch(activeTurn);
     this.attachedSession = {
       ...this.attachedSession,
+      turnEpoch,
       activeTurn: {
         chatId: activeTurn.chatId,
         threadId: activeTurn.threadId,
@@ -794,8 +846,34 @@ export class BridgeService {
         textPreview: activeTurn.textPreview ?? null,
         source: activeTurn.source ?? "attached-thread",
         inProgress: activeTurn.inProgress ?? true,
+        turnEpoch,
       },
     };
+  }
+
+  #resolveTurnEpoch(activeTurn) {
+    const currentTurn = this.attachedSession?.activeTurn ?? null;
+    if (this.#isSameTurnContext(currentTurn, activeTurn)) {
+      return currentTurn?.turnEpoch ?? this.attachedSession?.turnEpoch ?? ++this.turnEpochCounter;
+    }
+    return ++this.turnEpochCounter;
+  }
+
+  #isSameTurnContext(currentTurn, nextTurn) {
+    if (!currentTurn || !nextTurn) {
+      return false;
+    }
+    if (
+      currentTurn.chatId !== nextTurn.chatId ||
+      currentTurn.threadId !== nextTurn.threadId ||
+      (currentTurn.source ?? "bridge") !== (nextTurn.source ?? "bridge")
+    ) {
+      return false;
+    }
+    if (currentTurn.turnId && nextTurn.turnId) {
+      return currentTurn.turnId === nextTurn.turnId;
+    }
+    return currentTurn.source === "bridge" && (currentTurn.turnId == null || nextTurn.turnId == null);
   }
 
   #markAttachedSessionDegraded(reason) {
@@ -823,9 +901,6 @@ export class BridgeService {
     if (this.shutdownRequested) {
       return this.processingChats.size > 0 ? "draining" : "ready_to_stop";
     }
-    if (this.processingChats.size > 0) {
-      return "busy";
-    }
     const activeBindings = Object.values(state.activeBindings ?? {});
     if (
       activeBindings.length > 0 &&
@@ -833,7 +908,23 @@ export class BridgeService {
     ) {
       return "degraded";
     }
+    if (this.attachedSession?.activeTurn?.inProgress) {
+      return "busy";
+    }
+    if (this.processingChats.size > 0) {
+      return "busy";
+    }
     return "idle";
+  }
+
+  #isIntentionalForceShutdownError(error) {
+    if (!(this.shutdownRequested && this.shutdownSource === "tray")) {
+      return false;
+    }
+    if (error?.code === "CLIENT_CLOSED") {
+      return true;
+    }
+    return /codex app-server client closed/i.test(error?.message ?? "");
   }
 
   async #waitForAttachedThreadToBeIdle(binding, chatId) {
@@ -865,12 +956,56 @@ export class BridgeService {
       threadId: binding.threadId,
       turnId: inProgressTurn.id ?? null,
       startedAt: null,
-      textPreview: null,
+      textPreview: inProgressTurn.textPreview ?? null,
       source: "attached-thread",
       inProgress: true,
     };
     this.#setAttachedSessionObservedTurn(observedTurn);
     return observedTurn;
+  }
+
+  async #performInterrupt(chatId, activeRelay, interruptSession) {
+    try {
+      await this.codexClient?.interruptTurn?.({
+        threadId: activeRelay.threadId,
+        turnId: activeRelay.turnId,
+      });
+      if (!this.#matchesInterruptSession(interruptSession)) {
+        return;
+      }
+      await this.#dropQueuedJobsForChat(
+        chatId,
+        "当前运行已中断，排队消息已清空，请重新发送你想继续的内容。",
+      );
+      this.pendingByChat.delete(chatId);
+      this.#clearAttachedSessionActiveTurn();
+      await this.telegramApi.sendMessage(chatId, "已中断当前运行中的 turn，请重新发送消息。");
+    } catch (error) {
+      if (!this.#matchesInterruptSession(interruptSession)) {
+        return;
+      }
+      if (isThreadSessionLostError(error)) {
+        this.#markAttachedSessionDegraded("thread_session_not_ready");
+        await this.#recordLastError(chatId, {
+          scope: "interrupt",
+          message: "Bridge 会话未就绪，无法中断当前 turn。",
+        });
+        await this.telegramApi.sendMessage(
+          chatId,
+          "Bridge 会话未就绪，无法中断当前 turn。请回到 Codex 重新 attach。",
+        );
+        return;
+      }
+
+      await this.#recordLastError(chatId, {
+        scope: "interrupt",
+        message: error.message ?? String(error),
+      });
+      await this.telegramApi.sendMessage(
+        chatId,
+        `中断失败: ${error.message ?? String(error)}`,
+      );
+    }
   }
 
   #formatAttachedSessionTurn(activeTurn) {
@@ -885,13 +1020,14 @@ export class BridgeService {
       textPreview: activeTurn.textPreview ?? null,
       source: activeTurn.source ?? "bridge",
       inProgress: activeTurn.inProgress ?? false,
+      turnEpoch: activeTurn.turnEpoch ?? null,
       runningForMs:
         typeof activeTurn.startedAt === "number" ? this.nowFn() - activeTurn.startedAt : undefined,
     };
   }
 }
 
-function createAttachedSession({ binding, effectiveAccess, sessionStartedAt }) {
+function createAttachedSession({ binding, effectiveAccess, sessionStartedAt, generation }) {
   return {
     chatId: binding.chatId,
     threadId: binding.threadId,
@@ -901,6 +1037,8 @@ function createAttachedSession({ binding, effectiveAccess, sessionStartedAt }) {
     effectiveAccess,
     sessionReady: true,
     sessionStartedAt,
+    generation,
+    turnEpoch: 0,
     degradedReason: null,
     activeTurn: null,
   };

@@ -10,13 +10,17 @@ import { readState } from "../src/binding-store.mjs";
 import {
   createBlockingFirstSendTelegramApi,
   createBlockingNthSendTelegramApi,
+  createDeferredInterruptCodexClient,
   createFailingShutdownTelegramApi,
   createFailingAttachCodexClient,
   createFakeTelegramApi,
+  createHangingRelayCodexClient,
   createImmediateCodexClient,
+  createInspectFailingAttachCodexClient,
   createInterruptibleQueuedCodexClient,
   createQueuedCodexClient,
   createReadThreadFailsDuringWorkerCodexClient,
+  createRejectingInterruptCodexClient,
   createSessionAwareCodexClient,
   createTestStatePath,
   waitForNextTask,
@@ -48,6 +52,36 @@ test("attach only persists a binding after the app-server session is prepared", 
 
   const state = await readState(statePath);
   assert.deepEqual(state.activeBindings, {});
+});
+
+test("attach rolls back cleanly when zombie-turn inspection fails", async (t) => {
+  const statePath = await createTestStatePath(t);
+  const service = new BridgeService({
+    statePath,
+    codexClient: createInspectFailingAttachCodexClient(),
+    telegramApi: createFakeTelegramApi(),
+  });
+
+  await assert.rejects(
+    service.attach({
+      chatId: "1001",
+      threadId: "thread-123",
+      threadLabel: "Project A",
+      cwd: "D:\\project-a",
+      access: {
+        defaultApprovalPolicy: "never",
+        defaultSandboxPolicy: { type: "dangerFullAccess" },
+        overrideApprovalPolicy: null,
+        overrideSandboxPolicy: null,
+      },
+    }),
+    /inspect failed/i,
+  );
+
+  const state = await readState(statePath);
+  assert.deepEqual(state.activeBindings, {});
+  const runtime = await service.getRuntimeStatus();
+  assert.equal(runtime.attachedSession, null);
 });
 
 test("same-thread attach is idempotent once the bridge session is already ready", async (t) => {
@@ -85,6 +119,34 @@ test("same-thread attach is idempotent once the bridge session is already ready"
   });
 
   assert.equal(codexClient.attachedSessions.length, 1);
+});
+
+test("attach marks the bridge busy immediately when the attached thread already has an in-progress turn", async (t) => {
+  const statePath = await createTestStatePath(t);
+  const codexClient = createSessionAwareCodexClient({
+    externalActiveTurn: {
+      threadId: "thread-123",
+      turnId: "turn-stuck",
+      textPreview: "Unable to activate workspace 还是这么显示",
+    },
+  });
+  const service = new BridgeService({
+    statePath,
+    codexClient,
+    telegramApi: createFakeTelegramApi(),
+  });
+
+  await service.attach({
+    chatId: "1001",
+    threadId: "thread-123",
+    threadLabel: "Project A",
+    cwd: "D:\\project-a",
+  });
+
+  const runtime = await service.getRuntimeStatus();
+  assert.equal(runtime.mode, "busy");
+  assert.equal(runtime.attachedSession?.activeTurn?.turnId, "turn-stuck");
+  assert.match(runtime.attachedSession?.activeTurn?.textPreview ?? "", /Unable to activate workspace/);
 });
 
 test("attaching a different thread still preserves the detach-first conflict guard", async (t) => {
@@ -230,6 +292,176 @@ test("new Telegram input during draining gets a rejection message", async (t) =>
   const rejectionMessage = telegramApi.sent.find(({ text }) => /drain|reject|shutdown/i.test(text));
   assert.match(rejectionMessage?.text ?? "", /drain|reject|shutdown/i);
   assert.match(rejectionMessage?.text ?? "", /tray/i);
+});
+
+test("interrupt failures are reported clearly and do not block a later detach", async (t) => {
+  const statePath = await createTestStatePath(t);
+  const telegramApi = createFakeTelegramApi();
+  const codexClient = createRejectingInterruptCodexClient("interrupt timed out");
+  const service = new BridgeService({
+    statePath,
+    codexClient,
+    telegramApi,
+  });
+
+  await service.attach({
+    chatId: "1001",
+    threadId: "thread-123",
+    threadLabel: "Project A",
+    cwd: "D:\\project-a",
+  });
+
+  const interruptResult = await service.handleTelegramMessage({
+    chatId: "1001",
+    text: "/interrupt",
+  });
+  assert.equal(interruptResult.kind, "interrupt");
+
+  await waitForNextTask();
+  await waitForNextTask();
+
+  await service.handleTelegramMessage({
+    chatId: "1001",
+    text: "/detach",
+  });
+
+  assert.equal(
+    telegramApi.sent.some(({ text }) => /中断失败: interrupt timed out/.test(text)),
+    true,
+  );
+  assert.equal(
+    telegramApi.sent.some(({ text }) => /Telegram relay detached/i.test(text)),
+    true,
+  );
+});
+
+test("a backgrounded interrupt cannot mutate a newer attachment", async (t) => {
+  const statePath = await createTestStatePath(t);
+  const telegramApi = createFakeTelegramApi();
+  const codexClient = createDeferredInterruptCodexClient();
+  const service = new BridgeService({
+    statePath,
+    codexClient,
+    telegramApi,
+  });
+
+  await service.attach({
+    chatId: "1001",
+    threadId: "thread-123",
+    threadLabel: "Old Thread",
+    cwd: "D:\\project-a",
+  });
+
+  await service.handleTelegramMessage({
+    chatId: "1001",
+    text: "/interrupt",
+  });
+
+  await service.detach("1001");
+  await service.attach({
+    chatId: "1001",
+    threadId: "thread-456",
+    threadLabel: "New Thread",
+    cwd: "D:\\project-b",
+  });
+
+  codexClient.resolveInterrupt();
+  await waitForNextTask();
+  await waitForNextTask();
+
+  const runtime = await service.getRuntimeStatus();
+  assert.equal(runtime.attachedSession?.threadId, "thread-456");
+  assert.equal(runtime.attachedSession?.threadLabel, "New Thread");
+  assert.equal(runtime.attachedSession?.activeTurn?.threadId, "thread-456");
+  assert.equal(
+    telegramApi.sent.some(({ text }) => /已中断当前运行中的 turn/.test(text)),
+    false,
+  );
+  assert.equal(
+    telegramApi.sent.some(({ text }) => /排队消息已清空/.test(text)),
+    false,
+  );
+});
+
+test("a backgrounded interrupt cannot mutate a newer turn in the same attachment", async (t) => {
+  const statePath = await createTestStatePath(t);
+  const telegramApi = createFakeTelegramApi();
+  const codexClient = createDeferredInterruptCodexClient();
+  const service = new BridgeService({
+    statePath,
+    codexClient,
+    telegramApi,
+  });
+
+  await service.attach({
+    chatId: "1001",
+    threadId: "thread-123",
+    threadLabel: "Old Thread",
+    cwd: "D:\\project-a",
+  });
+
+  await service.handleTelegramMessage({
+    chatId: "1001",
+    text: "/interrupt",
+  });
+
+  codexClient.clearExternalActiveTurn();
+  const relay = await service.handleTelegramMessage({
+    chatId: "1001",
+    text: "new turn after interrupt",
+  });
+  await relay.completion;
+
+  codexClient.resolveInterrupt();
+  await waitForNextTask();
+  await waitForNextTask();
+
+  const runtime = await service.getRuntimeStatus();
+  assert.equal(runtime.attachedSession?.threadId, "thread-123");
+  assert.equal(runtime.attachedSession?.turnEpoch, 2);
+  assert.equal(
+    telegramApi.sent.some(({ text }) => /已中断当前运行中的 turn/.test(text)),
+    false,
+  );
+  assert.equal(
+    telegramApi.sent.some(({ text }) => /排队消息已清空/.test(text)),
+    false,
+  );
+});
+
+test("forced tray shutdown does not surface an intentional stop as a relay failure", async (t) => {
+  const statePath = await createTestStatePath(t);
+  const telegramApi = createFakeTelegramApi();
+  const codexClient = createHangingRelayCodexClient();
+  const service = new BridgeService({
+    statePath,
+    codexClient,
+    telegramApi,
+  });
+
+  await service.attach({
+    chatId: "1001",
+    threadId: "thread-123",
+    threadLabel: "Project A",
+    cwd: "D:\\project-a",
+  });
+
+  const relay = await service.handleTelegramMessage({
+    chatId: "1001",
+    text: "keep running",
+  });
+  await waitForNextTask();
+  await service.requestShutdown("tray", { force: true });
+  await relay.completion;
+
+  assert.equal(
+    telegramApi.sent.some(({ text }) => /Telegram relay error: Codex app-server client closed\./.test(text)),
+    false,
+  );
+  assert.equal(
+    telegramApi.sent.some(({ text }) => /Bridge shutdown in progress/i.test(text)),
+    false,
+  );
 });
 
 test("detaching the last binding triggers auto-exit intent", async (t) => {

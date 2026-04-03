@@ -359,6 +359,65 @@ export function createResumeRequiredInterruptFakeCodexProcess() {
   return fake;
 }
 
+export function createInterruptHangingFakeCodexProcess() {
+  const fake = createBaseFakeProcess();
+  const rl = readline.createInterface({ input: fake.stdin });
+  rl.on("line", (line) => {
+    const message = JSON.parse(line);
+
+    if (message.method === "initialize") {
+      handleInitialize(fake, message);
+      return;
+    }
+
+    if (message.method === "thread/resume") {
+      fake.stdout.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { thread: createFakeThread(message.params.threadId) },
+        })}\n`,
+      );
+      return;
+    }
+
+    if (message.method === "thread/read") {
+      fake.stdout.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            thread: {
+              ...createFakeThread(message.params.threadId),
+              turns: [
+                {
+                  id: "turn-stuck",
+                  status: "inProgress",
+                  items: [
+                    {
+                      id: "item-user",
+                      type: "userMessage",
+                      text: "Unable to activate workspace 还是这么显示",
+                    },
+                  ],
+                  input: [],
+                },
+              ],
+            },
+          },
+        })}\n`,
+      );
+      return;
+    }
+
+    if (message.method === "turn/interrupt") {
+      return;
+    }
+  });
+
+  return fake;
+}
+
 export function createAccessConfigFakeCodexProcess() {
   const fake = createBaseFakeProcess();
   let capturedResumeParams = null;

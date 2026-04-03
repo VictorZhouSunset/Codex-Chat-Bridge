@@ -21,6 +21,7 @@ export class CodexAppServerClient {
     this.pendingTurns = new Map();
     this.attachedThreadSession = null;
     this.started = false;
+    this.interruptTimeoutMs = options.interruptTimeoutMs ?? 12_000;
   }
 
   async start() {
@@ -30,6 +31,12 @@ export class CodexAppServerClient {
 
     this.process = this.processFactory();
     this.process.stderr?.on("data", () => {});
+    this.process.on?.("error", (error) => {
+      this.#failPendingOperations(error);
+    });
+    this.process.on?.("exit", () => {
+      this.#failPendingOperations(new Error("Codex app-server process exited."));
+    });
 
     const rl = readline.createInterface({ input: this.process.stdout });
     rl.on("line", (line) => {
@@ -61,7 +68,10 @@ export class CodexAppServerClient {
     for (let index = turns.length - 1; index >= 0; index -= 1) {
       const turn = turns[index];
       if (turn?.status === "inProgress") {
-        return turn;
+        return {
+          ...turn,
+          textPreview: extractTurnTextPreview(turn),
+        };
       }
     }
     return null;
@@ -163,23 +173,37 @@ export class CodexAppServerClient {
 
   async interruptTurn({ threadId, turnId }) {
     this.#assertAttachedThreadSession(threadId);
-    return this.request("turn/interrupt", {
-      threadId,
-      turnId,
-    });
+    try {
+      return await this.request(
+        "turn/interrupt",
+        {
+          threadId,
+          turnId,
+        },
+        { timeoutMs: this.interruptTimeoutMs },
+      );
+    } catch (error) {
+      if (error?.code === "REQUEST_TIMEOUT") {
+        const timeoutError = new Error("Interrupt request timed out while waiting for Codex app-server.");
+        timeoutError.code = "INTERRUPT_TIMEOUT";
+        throw timeoutError;
+      }
+      throw error;
+    }
   }
 
   async close() {
     if (!this.process) {
       return;
     }
+    this.#failPendingOperations(new Error("Codex app-server client closed."));
     this.process.stdin?.end();
     this.process.kill?.();
     this.clearAttachedThreadSession();
     this.started = false;
   }
 
-  request(method, params) {
+  request(method, params, options = {}) {
     const id = ++this.requestId;
     const message = {
       jsonrpc: "2.0",
@@ -189,7 +213,20 @@ export class CodexAppServerClient {
     };
 
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set(id, { resolve, reject });
+      const pendingRequest = { resolve, reject, timer: null };
+      if (typeof options.timeoutMs === "number" && options.timeoutMs > 0) {
+        pendingRequest.timer = setTimeout(() => {
+          if (!this.pendingRequests.delete(id)) {
+            return;
+          }
+          const timeoutError = new Error(
+            `Codex app-server request ${method} timed out after ${options.timeoutMs}ms.`,
+          );
+          timeoutError.code = "REQUEST_TIMEOUT";
+          reject(timeoutError);
+        }, options.timeoutMs);
+      }
+      this.pendingRequests.set(id, pendingRequest);
       this.process.stdin.write(`${JSON.stringify(message)}\n`);
     });
   }
@@ -211,6 +248,9 @@ export class CodexAppServerClient {
         return;
       }
       this.pendingRequests.delete(message.id);
+      if (pending.timer) {
+        clearTimeout(pending.timer);
+      }
       if (message.error) {
         pending.reject(new Error(message.error.message ?? "Unknown JSON-RPC error"));
         return;
@@ -291,6 +331,22 @@ export class CodexAppServerClient {
     }
   }
 
+  #failPendingOperations(error) {
+    const failure =
+      error instanceof Error ? error : new Error(error?.message ?? String(error ?? "Unknown process failure"));
+    for (const [id, pending] of this.pendingRequests.entries()) {
+      this.pendingRequests.delete(id);
+      if (pending.timer) {
+        clearTimeout(pending.timer);
+      }
+      pending.reject(failure);
+    }
+    for (const [threadId, pendingTurn] of this.pendingTurns.entries()) {
+      this.pendingTurns.delete(threadId);
+      pendingTurn.reject(failure);
+    }
+  }
+
   async #handleServerRequest(message) {
     const request = normalizeServerRequest(message);
     const pendingTurn = this.pendingTurns.get(request?.threadId ?? "");
@@ -363,6 +419,73 @@ export class CodexAppServerClient {
       throw error;
     }
   }
+}
+
+function extractTurnTextPreview(turn) {
+  const text = findUserText(turn);
+  if (!text) {
+    return null;
+  }
+  return `${text}`.trim() || null;
+}
+
+function findUserText(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const items = Array.isArray(value.items) ? value.items : [];
+  for (const item of items) {
+    const itemType = `${item?.type ?? ""}`.toLowerCase();
+    const itemRole = `${item?.role ?? ""}`.toLowerCase();
+    if (itemType.includes("user") || itemRole === "user") {
+      const direct = extractTextFromNode(item);
+      if (direct) {
+        return direct;
+      }
+    }
+  }
+
+  if (Array.isArray(value.input)) {
+    for (const entry of value.input) {
+      const direct = extractTextFromNode(entry);
+      if (direct) {
+        return direct;
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractTextFromNode(node) {
+  if (!node || typeof node !== "object") {
+    return null;
+  }
+
+  if (typeof node.text === "string" && node.text.trim()) {
+    return node.text.trim();
+  }
+
+  if (Array.isArray(node.content)) {
+    for (const part of node.content) {
+      const nested = extractTextFromNode(part);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+
+  if (Array.isArray(node.text_elements)) {
+    for (const part of node.text_elements) {
+      const nested = extractTextFromNode(part);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+
+  return null;
 }
 
 function defaultProcessFactory() {

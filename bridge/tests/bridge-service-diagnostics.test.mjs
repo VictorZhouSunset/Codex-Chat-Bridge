@@ -155,6 +155,37 @@ test("slash status reports a degraded bridge session and the current attached-th
   assert.match(telegramApi.sent.at(-1)?.text ?? "", /当前运行时长: 未知（已有 in-progress turn）/);
 });
 
+test("slash status includes the current running message preview for an attached-thread turn", async (t) => {
+  const statePath = await createTestStatePath(t);
+  const telegramApi = createFakeTelegramApi();
+  const codexClient = createSessionAwareCodexClient({
+    externalActiveTurn: {
+      threadId: "thread-123",
+      turnId: "turn-external",
+      textPreview: "Unable to activate workspace 还是这么显示",
+    },
+  });
+  const service = new BridgeService({
+    statePath,
+    codexClient,
+    telegramApi,
+  });
+
+  await service.attach({
+    chatId: "1001",
+    threadId: "thread-123",
+    threadLabel: "Project A",
+    cwd: "D:\\project-a",
+  });
+
+  await service.handleTelegramMessage({
+    chatId: "1001",
+    text: "/status",
+  });
+
+  assert.match(telegramApi.sent.at(-1)?.text ?? "", /当前运行消息: Unable to \.\.\./);
+});
+
 test("slash changes reports concise git-style workspace changes", async (t) => {
   const statePath = await createTestStatePath(t);
   const telegramApi = createFakeTelegramApi();

@@ -58,6 +58,7 @@ export function buildStatusMessage({
     `当前权限: ${describeAccessSummary(binding.access)}`,
     `排队消息: ${runtimeStatus.queueDepth ?? 0}`,
     `待处理交互: ${runtimeStatus.pendingInteractiveCount ?? 0}`,
+    formatActiveRelayMessageLine(activeRelay),
     formatActiveRelayLine(activeRelay),
     formatObservedExternalTurnLine(observedExternalTurn),
     lastError ? `最近错误: ${lastError.message}` : "最近错误: 无",
@@ -126,6 +127,15 @@ function formatActiveRelayLine(activeRelay) {
   return null;
 }
 
+function formatActiveRelayMessageLine(activeRelay) {
+  const textPreview = `${activeRelay?.textPreview ?? ""}`.trim();
+  if (!textPreview) {
+    return null;
+  }
+
+  return `当前运行消息: ${summarizePreview(textPreview)}`;
+}
+
 function formatObservedExternalTurnLine(observedExternalTurn) {
   if (!observedExternalTurn?.turnId) {
     return null;
@@ -157,4 +167,8 @@ function formatDurationMs(durationMs) {
     return `${minutes}m ${seconds}s`;
   }
   return `${seconds}s`;
+}
+
+function summarizePreview(text) {
+  return text.length > 10 ? `${text.slice(0, 10)}...` : text;
 }

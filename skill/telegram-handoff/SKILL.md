@@ -57,7 +57,8 @@ node "$BRIDGE_ROOT/src/cli.mjs" attach --approval-policy never --sandbox-mode da
 13. The ready message now also includes the thread id and the current access summary used for future Telegram relays.
 14. If Codex did not write the current session permission into the attach command, the bridge must fall back to `readonly` and say so explicitly in the Telegram ready message.
 15. If Codex writes malformed permission parameters, the CLI should fail loudly so Codex can retry with corrected values.
-16. Report the attached thread id and remind the user that Telegram messages will continue the same thread.
+16. If the attached thread already has an unfinished turn, the initial Telegram ready message must warn about it instead of pretending the bridge is fully idle.
+17. Report the attached thread id and remind the user that Telegram messages will continue the same thread.
 
 If the user wants to stop Telegram relay for the current default chat:
 
@@ -154,12 +155,14 @@ Once attached, the Telegram bridge will:
 - support `/help` to summarize the Telegram bridge commands
 - support `/status` to inspect the current binding, runtime mode, queue depth, pending prompts, access profile, and active turn runtime when available
 - `/status` should reflect the currently attached thread and its current running turn when known
+- `/status` should include a short `当前运行消息: ...` preview when the running turn text can be identified
 - support `/changes` to inspect concise git-style workspace changes from the attached project
 - support `/last-error` to inspect the most recent bridge error recorded for this Telegram chat
 - support `/cancel` for deterministic cancellation of a pending approval or question
 - support `/interrupt` to stop the current running turn and clear queued Telegram messages so the user can resend cleanly
 - `/interrupt` should act on the currently attached thread's running turn, even if the current bridge process did not start that turn
 - if the session is degraded, `/interrupt` should tell the user to re-attach instead of attempting hidden recovery
+- if `/interrupt` fails, it must report a clear error back to Telegram and must not block later `/status`, `/detach`, or normal messages
 - support `/detach` as a deterministic detach alias
 - support `/permission` to inspect the current bridge-side access profile and show an inline chooser for future Telegram relays
 - detach on `回到 Codex`
@@ -191,6 +194,10 @@ If the tray/menu-bar companion is used to shut the bridge down while work is in 
 - stop accepting new relay work
 - drop queued but not-yet-started Telegram jobs
 - auto-exit once the current turn completes
+
+The tray's own shutdown action is stronger:
+
+- tray shutdown should force-stop the bridge instead of waiting forever on a hung interrupt or stuck turn
 
 ## Serve Mode
 

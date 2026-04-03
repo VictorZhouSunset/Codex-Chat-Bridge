@@ -359,6 +359,7 @@ export function createSessionAwareCodexClient(options = {}) {
           id: externalActiveTurn.turnId,
           status: "inProgress",
           threadId,
+          textPreview: externalActiveTurn.textPreview ?? null,
         };
       }
       return null;
@@ -375,6 +376,207 @@ export function createSessionAwareCodexClient(options = {}) {
     },
     setExternalActiveTurn(turn) {
       externalActiveTurn = turn;
+    },
+  };
+}
+
+export function createRejectingInterruptCodexClient(message = "interrupt failed") {
+  let externalActiveTurn = {
+    threadId: "thread-123",
+    turnId: "turn-external",
+    textPreview: "old turn",
+  };
+  let attached = null;
+
+  return {
+    attachedSessions: [],
+    interrupts: [],
+    async attachThreadSession(payload) {
+      attached = {
+        threadId: payload.threadId,
+        approvalPolicy: payload.approvalPolicy,
+        sandboxPolicy: payload.sandboxPolicy,
+        cwd: payload.cwd ?? null,
+      };
+      this.attachedSessions.push(payload);
+      externalActiveTurn.threadId = payload.threadId;
+      return attached;
+    },
+    async inspectActiveTurn(threadId) {
+      if (externalActiveTurn && externalActiveTurn.threadId === threadId) {
+        return {
+          id: externalActiveTurn.turnId,
+          status: "inProgress",
+          threadId,
+          textPreview: externalActiveTurn.textPreview,
+        };
+      }
+      return null;
+    },
+    async interruptTurn(payload) {
+      this.interrupts.push(payload);
+      await Promise.resolve();
+      throw new Error(message);
+    },
+    getAttachedThreadSession() {
+      return attached;
+    },
+    clearAttachedThreadSession() {
+      attached = null;
+    },
+  };
+}
+
+export function createDeferredInterruptCodexClient() {
+  let externalActiveTurn = {
+    threadId: "thread-123",
+    turnId: "turn-external",
+    textPreview: "old turn",
+  };
+  let attached = null;
+  let interruptResolve;
+  let interruptReject;
+  const interruptPromise = new Promise((resolve, reject) => {
+    interruptResolve = resolve;
+    interruptReject = reject;
+  });
+
+  return {
+    attachedSessions: [],
+    relayCalls: [],
+    interrupts: [],
+    async attachThreadSession(payload) {
+      attached = {
+        threadId: payload.threadId,
+        approvalPolicy: payload.approvalPolicy,
+        sandboxPolicy: payload.sandboxPolicy,
+        cwd: payload.cwd ?? null,
+      };
+      this.attachedSessions.push(payload);
+      externalActiveTurn.threadId = payload.threadId;
+      return attached;
+    },
+    async inspectActiveTurn(threadId) {
+      if (externalActiveTurn && externalActiveTurn.threadId === threadId) {
+        return {
+          id: externalActiveTurn.turnId,
+          status: "inProgress",
+          threadId,
+          textPreview: externalActiveTurn.textPreview,
+        };
+      }
+      return null;
+    },
+    async interruptTurn(payload) {
+      this.interrupts.push(payload);
+      await interruptPromise;
+      externalActiveTurn = null;
+      return { interrupted: true };
+    },
+    async relayText(payload) {
+      this.relayCalls.push({
+        threadId: payload.threadId,
+        text: payload.text,
+      });
+      await payload.onTurnStarted?.({
+        threadId: payload.threadId,
+        turnId: "turn-new",
+      });
+      return {
+        threadId: payload.threadId,
+        turnId: "turn-new",
+        text: `echo:${payload.text}`,
+      };
+    },
+    resolveInterrupt() {
+      interruptResolve?.();
+    },
+    rejectInterrupt(error) {
+      interruptReject?.(error);
+    },
+    getAttachedThreadSession() {
+      return attached;
+    },
+    clearAttachedThreadSession() {
+      attached = null;
+    },
+    clearExternalActiveTurn() {
+      externalActiveTurn = null;
+    },
+    setExternalActiveTurn(turn) {
+      externalActiveTurn = turn;
+    },
+  };
+}
+
+export function createHangingRelayCodexClient() {
+  let attached = null;
+  let relayReject;
+  return {
+    attachedSessions: [],
+    relayCalls: [],
+    async attachThreadSession(payload) {
+      attached = {
+        threadId: payload.threadId,
+        approvalPolicy: payload.approvalPolicy,
+        sandboxPolicy: payload.sandboxPolicy,
+        cwd: payload.cwd ?? null,
+      };
+      this.attachedSessions.push(payload);
+      return attached;
+    },
+    async inspectActiveTurn() {
+      return null;
+    },
+    async relayText(payload) {
+      this.relayCalls.push({
+        threadId: payload.threadId,
+        text: payload.text,
+      });
+      await payload.onTurnStarted?.({
+        threadId: payload.threadId,
+        turnId: "turn-hanging",
+      });
+      return new Promise((resolve, reject) => {
+        relayReject = reject;
+      });
+    },
+    async close() {
+      const error = new Error("Codex app-server client closed.");
+      error.code = "CLIENT_CLOSED";
+      relayReject?.(error);
+    },
+    getAttachedThreadSession() {
+      return attached;
+    },
+    clearAttachedThreadSession() {
+      attached = null;
+    },
+  };
+}
+
+export function createInspectFailingAttachCodexClient(message = "inspect failed") {
+  let attached = null;
+  return {
+    attachedSessions: [],
+    async attachThreadSession(payload) {
+      attached = {
+        threadId: payload.threadId,
+        approvalPolicy: payload.approvalPolicy,
+        sandboxPolicy: payload.sandboxPolicy,
+        cwd: payload.cwd ?? null,
+      };
+      this.attachedSessions.push(payload);
+      return attached;
+    },
+    async inspectActiveTurn() {
+      throw new Error(message);
+    },
+    getAttachedThreadSession() {
+      return attached;
+    },
+    clearAttachedThreadSession() {
+      attached = null;
     },
   };
 }

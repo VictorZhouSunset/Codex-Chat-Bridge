@@ -149,6 +149,39 @@ test("POST /shutdown enters draining when busy", async () => {
   assert.equal(response.body.safeToStop, false);
 });
 
+test("POST /shutdown supports a forced stop for tray shutdown", async () => {
+  const requests = [];
+  const bridgeService = {
+    async getRuntimeStatus() {
+      return {
+        mode: "ready_to_stop",
+        queueDepth: 0,
+        shutdownSource: "tray",
+      };
+    },
+    async requestShutdown(source, options) {
+      requests.push({ source, options });
+      return this.getRuntimeStatus();
+    },
+  };
+
+  const response = await resolveControlResponse({
+    method: "POST",
+    url: "/shutdown",
+    body: { source: "tray", force: true },
+    bridgeService,
+  });
+
+  assert.deepEqual(requests, [
+    {
+      source: "tray",
+      options: { force: true },
+    },
+  ]);
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.safeToStop, true);
+});
+
 test("POST /attach delegates binding creation to the live bridge service", async () => {
   const requests = [];
   const bridgeService = {

@@ -12,6 +12,7 @@
 
 - `attach` auto-starts the bridge process if needed.
 - A successful `attach` means both the Telegram binding and the bridge-side Codex session are ready for the attached thread.
+- If the attached thread already contains an unfinished turn, the initial Telegram ready message warns about that running turn instead of silently pretending the bridge is idle.
 - When the bridge starts, it also starts a temporary tray companion:
   - Windows: notification area icon
   - macOS: menu-bar icon
@@ -19,10 +20,11 @@
 - If the final active Telegram binding is detached, the bridge transitions to `ready_to_stop` and exits automatically.
 - When the bridge reaches a clean exit path (`ready_to_stop`), it clears `activeBindings` before stopping so stale bindings do not survive a dead daemon.
 - If the tray requests shutdown while the bridge is idle, the bridge exits immediately.
-- If the tray requests shutdown while a turn is running, the bridge enters `draining`:
+- Telegram-triggered draining still works like this while a turn is running:
   - the current turn is allowed to finish
   - queued but not-yet-started Telegram jobs are dropped
   - new Telegram relay input is rejected until the process exits
+- Tray shutdown is stronger: it force-stops the bridge instead of waiting forever on a hung interrupt or stuck turn.
 
 ## Command Selection
 
@@ -213,11 +215,13 @@ The Telegram side supports:
 - `/help` for a concise bridge command summary
 - `/status` for bridge-local runtime diagnostics
 - `/status` reflects the currently attached thread and the current running turn when known
+- `/status` includes `当前运行消息: ...` when the current running turn's user message can be identified
 - `/changes` for concise git-style workspace changes from the bound project
 - `/last-error` for the most recent bridge-side failure recorded for that chat
 - `/cancel` to cancel a pending interactive approval or question
 - `/interrupt` to stop the current running turn and clear queued Telegram messages
 - `/interrupt` targets the currently attached thread's running turn, even if the current bridge process did not start it
 - `/interrupt` still does not try to implicitly recover a degraded session
+- `/interrupt` failures are reported back to Telegram explicitly and should not block later `/status`, `/detach`, or relay messages
 - `/detach` to stop relaying the current Telegram chat
 - `/permission` to inspect or change the access profile used for future Telegram relays

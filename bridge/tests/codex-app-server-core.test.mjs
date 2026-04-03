@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { CodexAppServerClient } from "../src/codex-app-server.mjs";
 import {
   createFakeCodexProcess,
+  createInterruptHangingFakeCodexProcess,
   createResumeRequiredFakeCodexProcess,
   createResumeRequiredInterruptFakeCodexProcess,
 } from "./helpers/codex-app-server-fixtures.mjs";
@@ -144,6 +145,54 @@ test("attaches a thread session once and reuses it for relay plus interrupt", as
     "turn/start",
     "turn/interrupt",
   ]);
+
+  await client.close();
+});
+
+test("inspectActiveTurn extracts a concise preview of the running user message", async () => {
+  const client = new CodexAppServerClient({
+    processFactory: () => createInterruptHangingFakeCodexProcess(),
+  });
+
+  await client.start();
+  await client.attachThreadSession({
+    threadId: "thread-xyz",
+    approvalPolicy: "never",
+    sandboxPolicy: { type: "dangerFullAccess" },
+  });
+
+  const activeTurn = await client.inspectActiveTurn("thread-xyz");
+
+  assert.equal(activeTurn.id, "turn-stuck");
+  assert.match(activeTurn.textPreview ?? "", /Unable to activate workspace/);
+
+  await client.close();
+});
+
+test("interruptTurn times out with a clear interrupt-timeout error", async () => {
+  const client = new CodexAppServerClient({
+    processFactory: () => createInterruptHangingFakeCodexProcess(),
+    interruptTimeoutMs: 20,
+  });
+
+  await client.start();
+  await client.attachThreadSession({
+    threadId: "thread-xyz",
+    approvalPolicy: "never",
+    sandboxPolicy: { type: "dangerFullAccess" },
+  });
+
+  await assert.rejects(
+    client.interruptTurn({
+      threadId: "thread-xyz",
+      turnId: "turn-stuck",
+    }),
+    (error) => {
+      assert.equal(error?.code, "INTERRUPT_TIMEOUT");
+      assert.match(error?.message ?? "", /timed out/i);
+      return true;
+    },
+  );
 
   await client.close();
 });
